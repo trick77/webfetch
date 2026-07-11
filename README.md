@@ -16,6 +16,33 @@ out, err := webfetch.Fetch(ctx, "https://example.com/article", webfetch.Options{
 })
 ```
 
+## What's different from upstream `mcp-server-fetch`
+
+Same tool contract — identical `fetch` schema, the `Contents of <url>:` wrapper,
+and the truncation / error strings — but:
+
+- **In-process, no sidecar.** Runs directly inside your Go process: no Node
+  subprocess, no Python runtime, no separate container to deploy or network-isolate.
+- **Strict SSRF guard.** Reaches only globally-routable public IPs, enforced
+  after DNS resolution in the dialer. Upstream explicitly warns it *can* reach
+  local/internal addresses; here it cannot.
+  → [SSRF protection](#ssrf-protection-only-public-ips-are-reachable)
+- **PDF text extraction** (opt-in `ExtractPDF`). Upstream returns PDFs as
+  unusable raw bytes; webfetch can extract their text, still fully in-process.
+  → [Extension: `ExtractPDF`](#extension-extractpdf-off-by-default)
+- **Content metadata** (opt-in `IncludeMetadata`). Optional
+  title/author/date/site/language frontmatter — not offered upstream.
+  → [Extension: `IncludeMetadata`](#extension-includemetadata-off-by-default)
+- **Pure-Go extraction pipeline.** `go-readability` + `html-to-markdown` in place
+  of upstream's Node `readabilipy` + `markdownify`; output is byte-identical on
+  typical pages. → [Fidelity](#fidelity)
+- **No proxy support.** Upstream's `--proxy-url` is intentionally unsupported: a
+  proxy would move egress outside the guarded dialer, which is exactly where the
+  SSRF check lives.
+
+Both opt-in extensions default to off, so unless you enable them the output stays
+byte-identical to upstream.
+
 ## Tool
 
 The module exposes a single tool, equivalent to upstream `mcp-server-fetch`:
