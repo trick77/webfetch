@@ -37,12 +37,11 @@ jobs:
           go-version: "1.25"
           cache-dependency-path: go.sum
 
-      # A Go module tag is only useful if the tagged commit builds and passes,
-      # so gate the tag on build + tests (equivalent to loom's image-build gate).
-      - name: Build and test
-        run: |
-          go build ./...
-          go test ./...
+      # A Go module tag is only useful if the tagged commit builds, so gate the
+      # tag on build. Tests already ran on the PR into master (CI does not
+      # re-test on the master push), so the release does not re-run them.
+      - name: Build
+        run: go build ./...
 
       - id: ver
         name: Compute next version
