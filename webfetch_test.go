@@ -45,6 +45,55 @@ func TestFetch_HTMLToMarkdown(t *testing.T) {
 	}
 }
 
+func TestFetch_IncludeMetadata(t *testing.T) {
+	allowLoopback(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<!doctype html><html lang="en"><head>
+			<title>Great: Article #1 "quoted"</title>
+			<meta name="author" content="Jane Doe">
+			<meta property="article:published_time" content="2024-01-02T15:04:05Z">
+			<meta property="og:site_name" content="Example Blog">
+			</head><body>
+			<article><h1>Great Article</h1><p>This is the main content of the article that readability should keep because it is long enough to be considered the primary body text of the page.</p></article>
+			</body></html>`)
+	}))
+	defer srv.Close()
+
+	out, err := Fetch(context.Background(), srv.URL+"/post", Options{IncludeMetadata: true})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	// Frontmatter sits inside the wrapper, ahead of the markdown.
+	fmStart := fmt.Sprintf("Contents of %s/post:\n---\n", srv.URL)
+	if !strings.HasPrefix(out, fmStart) {
+		t.Fatalf("expected frontmatter after wrapper, got:\n%s", out)
+	}
+	for _, want := range []string{
+		`title: "Great: Article #1 \"quoted\""`, // ":", "#" and quotes escaped/safe
+		`author: "Jane Doe"`,
+		`published: "2024-01-02T15:04:05Z"`,
+		`site: "Example Blog"`,
+		`language: "en"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected frontmatter line %q, got:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "\n---\n\nThis is the main content") {
+		t.Fatalf("expected frontmatter to close before the markdown body, got:\n%s", out)
+	}
+
+	// Default (no IncludeMetadata) must not emit any frontmatter — fidelity.
+	plain, err := Fetch(context.Background(), srv.URL+"/post", Options{})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if strings.Contains(plain, "---\n") || strings.Contains(plain, "title:") {
+		t.Fatalf("default output must not contain frontmatter, got:\n%s", plain)
+	}
+}
+
 func TestFetch_RawSkipsSimplification(t *testing.T) {
 	allowLoopback(t)
 	body := `<!doctype html><html><body><article><h1>Hi</h1><p>Body body body body body body body body body.</p></article></body></html>`

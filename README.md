@@ -33,6 +33,28 @@ markdown.
 (`webfetch.Fetch` maps these to the `Options` fields `MaxLength`, `StartIndex`,
 and `Raw`.)
 
+### Extension: `IncludeMetadata` (off by default)
+
+`Options.IncludeMetadata` is the one field beyond the upstream contract. When
+`true`, the extracted Markdown is prefixed with a small YAML frontmatter block
+built from metadata Readability already parses — `title`, `author`, `published`,
+`site`, `language` (non-empty fields only):
+
+```yaml
+---
+title: "The Article Title"
+author: "Jane Doe"
+published: "2024-01-02T15:04:05Z"
+site: "Example Blog"
+language: "en"
+---
+```
+
+It applies only to the HTML-simplification path (not `Raw`, not non-HTML
+content), and the frontmatter counts as part of the returned content, so
+`StartIndex` / `MaxLength` page over it too. Left `false` (the default), output
+is byte-identical to upstream — see [Fidelity](#fidelity).
+
 ## Fidelity
 
 The observable contract of the upstream tool is reproduced closely: the

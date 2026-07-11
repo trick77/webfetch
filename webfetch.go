@@ -55,6 +55,16 @@ type Options struct {
 	Raw bool
 	// UserAgent overrides the autonomous User-Agent. Empty uses the default.
 	UserAgent string
+	// IncludeMetadata, when true, prepends a small YAML frontmatter block
+	// (title, author, published, site, language — non-empty fields only) ahead
+	// of the extracted Markdown. It applies only to the HTML-simplification path
+	// (not Raw and not non-HTML content). Default false, which keeps the output
+	// byte-identical to upstream mcp-server-fetch.
+	//
+	// The frontmatter counts as part of the returned content, so StartIndex /
+	// MaxLength page over it too; hold IncludeMetadata constant across paged
+	// calls so a page-2 StartIndex stays aligned.
+	IncludeMetadata bool
 }
 
 // Fetch fetches the URL, extracts/keeps the content, applies
@@ -82,7 +92,7 @@ func Fetch(ctx context.Context, rawURL string, opts Options) (string, error) {
 		startIndex = 0
 	}
 
-	content, prefix, err := fetchURL(ctx, rawURL, userAgent, opts.Raw)
+	content, prefix, err := fetchURL(ctx, rawURL, userAgent, opts.Raw, opts.IncludeMetadata)
 	if err != nil {
 		return "", err
 	}
@@ -117,7 +127,7 @@ func Fetch(ctx context.Context, rawURL string, opts Options) (string, error) {
 // fetchURL fetches the URL and returns (content, prefix). content is either
 // extracted Markdown or the raw body; prefix is the non-empty note prepended
 // for non-simplifiable content types, matching upstream.
-func fetchURL(ctx context.Context, rawURL, userAgent string, forceRaw bool) (string, string, error) {
+func fetchURL(ctx context.Context, rawURL, userAgent string, forceRaw, includeMetadata bool) (string, string, error) {
 	client := newHTTPClient(30 * time.Second)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -155,7 +165,7 @@ func fetchURL(ctx context.Context, rawURL, userAgent string, forceRaw bool) (str
 		contentType == ""
 
 	if isPageHTML && !forceRaw {
-		return extractContentFromHTML(pageRaw, rawURL), "", nil
+		return extractContentFromHTML(pageRaw, rawURL, includeMetadata), "", nil
 	}
 	return pageRaw, fmt.Sprintf("Content type %s cannot be simplified to markdown, but here is the raw content:\n", contentType), nil
 }
@@ -163,7 +173,7 @@ func fetchURL(ctx context.Context, rawURL, userAgent string, forceRaw bool) (str
 // extractContentFromHTML extracts the main article content and converts it to
 // Markdown, mirroring upstream's readabilipy + markdownify(ATX). On extraction
 // failure it returns the same error sentinel upstream returns.
-func extractContentFromHTML(html, rawURL string) string {
+func extractContentFromHTML(html, rawURL string, includeMetadata bool) string {
 	var base *url.URL
 	if u, err := url.Parse(rawURL); err == nil {
 		base = u
@@ -188,7 +198,52 @@ func extractContentFromHTML(html, rawURL string) string {
 	if err != nil || strings.TrimSpace(markdown) == "" {
 		return "<error>Page failed to be simplified from HTML</error>"
 	}
+	if includeMetadata {
+		if fm := articleFrontmatter(article); fm != "" {
+			return fm + markdown
+		}
+	}
 	return markdown
+}
+
+// articleFrontmatter builds a small YAML frontmatter block from the metadata
+// Readability already parsed (title, byline, published time, site name,
+// language). Empty fields are omitted; if nothing is populated it returns "".
+// Values are emitted as double-quoted YAML scalars so titles/bylines containing
+// ":", "#", quotes, or a leading "-" cannot produce malformed frontmatter.
+func articleFrontmatter(a readability.Article) string {
+	var b strings.Builder
+	add := func(key, val string) {
+		if strings.TrimSpace(val) == "" {
+			return
+		}
+		fmt.Fprintf(&b, "%s: %s\n", key, yamlQuote(val))
+	}
+	add("title", a.Title())
+	add("author", a.Byline())
+	if pt, err := a.PublishedTime(); err == nil && !pt.IsZero() {
+		add("published", pt.Format(time.RFC3339))
+	}
+	add("site", a.SiteName())
+	add("language", a.Language())
+	if b.Len() == 0 {
+		return ""
+	}
+	return "---\n" + b.String() + "---\n\n"
+}
+
+// yamlQuote renders s as a double-quoted YAML scalar, escaping backslashes and
+// double quotes and flattening any embedded newlines/tabs to spaces so the
+// value stays on a single frontmatter line.
+func yamlQuote(s string) string {
+	s = strings.NewReplacer(
+		`\`, `\\`,
+		`"`, `\"`,
+		"\n", " ",
+		"\r", " ",
+		"\t", " ",
+	).Replace(s)
+	return `"` + s + `"`
 }
 
 // newHTTPClient builds an HTTP client whose dialer enforces the SSRF guard and
