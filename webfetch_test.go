@@ -135,6 +135,87 @@ func TestFetch_ExtractPDF(t *testing.T) {
 	}
 }
 
+func TestFetch_EscapeHatch(t *testing.T) {
+	allowLoopback(t)
+	page := `<!doctype html><html lang="en"><body>
+		<nav>NAVMARKER menu</nav>
+		<div class="ad">ADMARKER buy now</div>
+		<article id="main"><h1>Heading</h1><p>ARTICLEMARKER the primary body text, long enough to be the main content of the page.</p>
+		<p class="drop">DROPMARKER a removable sentence with enough words that readability keeps it by default.</p></article>
+		<footer>FOOTERMARKER copyright</footer>
+		</body></html>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, page)
+	}))
+	defer srv.Close()
+
+	// FullPage: skips Readability, so nav/footer that Readability drops survive.
+	full, err := Fetch(context.Background(), srv.URL+"/p", Options{FullPage: true})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	for _, want := range []string{"NAVMARKER", "ARTICLEMARKER", "FOOTERMARKER"} {
+		if !strings.Contains(full, want) {
+			t.Fatalf("FullPage missing %q, got:\n%s", want, full)
+		}
+	}
+
+	// Selector: only the matched subtree is converted.
+	only, err := Fetch(context.Background(), srv.URL+"/p", Options{Selector: "#main"})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if !strings.Contains(only, "ARTICLEMARKER") {
+		t.Fatalf("Selector should keep the target, got:\n%s", only)
+	}
+	if strings.Contains(only, "NAVMARKER") || strings.Contains(only, "FOOTERMARKER") {
+		t.Fatalf("Selector should exclude non-target content, got:\n%s", only)
+	}
+
+	// ExcludeSelectors composes with FullPage: the ad is stripped, the rest stays.
+	noAd, err := Fetch(context.Background(), srv.URL+"/p", Options{FullPage: true, ExcludeSelectors: []string{".ad"}})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if strings.Contains(noAd, "ADMARKER") {
+		t.Fatalf("ExcludeSelectors should remove the ad, got:\n%s", noAd)
+	}
+	if !strings.Contains(noAd, "ARTICLEMARKER") {
+		t.Fatalf("ExcludeSelectors removed too much, got:\n%s", noAd)
+	}
+
+	// ExcludeSelectors composes with the DEFAULT Readability path (no FullPage/
+	// Selector): the pruned element is gone though Readability would keep it.
+	def, err := Fetch(context.Background(), srv.URL+"/p", Options{})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if !strings.Contains(def, "DROPMARKER") {
+		t.Fatalf("precondition: default Readability path should keep the drop paragraph, got:\n%s", def)
+	}
+	excl, err := Fetch(context.Background(), srv.URL+"/p", Options{ExcludeSelectors: []string{".drop"}})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if strings.Contains(excl, "DROPMARKER") {
+		t.Fatalf("ExcludeSelectors should compose with the Readability path, got:\n%s", excl)
+	}
+	if !strings.Contains(excl, "ARTICLEMARKER") {
+		t.Fatalf("ExcludeSelectors removed too much on the Readability path, got:\n%s", excl)
+	}
+
+	// No selector match: sentinel content, and importantly a nil error (so a
+	// caller's fallback is not triggered by a mistyped selector).
+	miss, err := Fetch(context.Background(), srv.URL+"/p", Options{Selector: "#does-not-exist"})
+	if err != nil {
+		t.Fatalf("no-match must not error (would misfire the fallback): %v", err)
+	}
+	if !strings.Contains(miss, "<error>No content matched the selector.</error>") {
+		t.Fatalf("expected no-match sentinel, got:\n%s", miss)
+	}
+}
+
 func TestFetch_RawSkipsSimplification(t *testing.T) {
 	allowLoopback(t)
 	body := `<!doctype html><html><body><article><h1>Hi</h1><p>Body body body body body body body body body.</p></article></body></html>`
