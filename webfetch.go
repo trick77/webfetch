@@ -1,6 +1,6 @@
 // Package webfetch is a faithful, dependency-light Go port of the reference
 // Python "mcp-server-fetch" tool (github.com/modelcontextprotocol/servers,
-// src/fetch, pinned at 2025.4.7). It fetches a URL, optionally extracts the
+// src/fetch). It fetches a URL, optionally extracts the
 // page's main content as Markdown, honours robots.txt for autonomous fetches,
 // and returns text ready to hand to an LLM.
 //

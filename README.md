@@ -2,7 +2,7 @@
 
 A dependency-light Go port of the reference Python
 [`mcp-server-fetch`](https://github.com/modelcontextprotocol/servers/tree/main/src/fetch)
-tool (pinned to behaviour of version `2025.4.7`).
+tool.
 
 It fetches a URL, extracts the main content as Markdown (or returns raw HTML),
 honours `robots.txt` for autonomous fetches, and returns text ready to hand to
