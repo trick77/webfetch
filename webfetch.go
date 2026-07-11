@@ -21,6 +21,7 @@
 package webfetch
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -31,6 +32,7 @@ import (
 
 	readability "codeberg.org/readeck/go-readability/v2"
 	md "github.com/JohannesKaufmann/html-to-markdown"
+	"github.com/ledongthuc/pdf"
 	"golang.org/x/net/html/charset"
 )
 
@@ -65,6 +67,12 @@ type Options struct {
 	// MaxLength page over it too; hold IncludeMetadata constant across paged
 	// calls so a page-2 StartIndex stays aligned.
 	IncludeMetadata bool
+	// ExtractPDF, when true, extracts the text of PDF responses (detected by
+	// content-type or the "%PDF-" magic bytes) instead of returning the raw
+	// bytes behind the "cannot be simplified" note. Extraction is pure-Go (no
+	// subprocess). Raw takes precedence: if Raw is set, the PDF is returned
+	// unextracted. Default false, preserving the upstream raw-bytes behaviour.
+	ExtractPDF bool
 }
 
 // Fetch fetches the URL, extracts/keeps the content, applies
@@ -92,7 +100,7 @@ func Fetch(ctx context.Context, rawURL string, opts Options) (string, error) {
 		startIndex = 0
 	}
 
-	content, prefix, err := fetchURL(ctx, rawURL, userAgent, opts.Raw, opts.IncludeMetadata)
+	content, prefix, err := fetchURL(ctx, rawURL, userAgent, opts.Raw, opts.IncludeMetadata, opts.ExtractPDF)
 	if err != nil {
 		return "", err
 	}
@@ -127,7 +135,7 @@ func Fetch(ctx context.Context, rawURL string, opts Options) (string, error) {
 // fetchURL fetches the URL and returns (content, prefix). content is either
 // extracted Markdown or the raw body; prefix is the non-empty note prepended
 // for non-simplifiable content types, matching upstream.
-func fetchURL(ctx context.Context, rawURL, userAgent string, forceRaw, includeMetadata bool) (string, string, error) {
+func fetchURL(ctx context.Context, rawURL, userAgent string, forceRaw, includeMetadata, extractPDF bool) (string, string, error) {
 	client := newHTTPClient(30 * time.Second)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -143,12 +151,27 @@ func fetchURL(ctx context.Context, rawURL, userAgent string, forceRaw, includeMe
 		return "", "", fmt.Errorf("Failed to fetch %s - status code %d", rawURL, resp.StatusCode)
 	}
 
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to fetch %s: %v", rawURL, err)
+	}
 	contentType := resp.Header.Get("content-type")
+
+	// PDF handling runs on the raw bytes, before charset decoding (which would
+	// corrupt binary content). Raw takes precedence, matching the option's doc.
+	if extractPDF && !forceRaw && isPDF(contentType, bodyBytes) {
+		text, err := extractPDFText(bodyBytes)
+		if err != nil {
+			return "", "", fmt.Errorf("Failed to extract PDF %s: %v", rawURL, err)
+		}
+		return text, "", nil
+	}
+
 	// Decode the body to UTF-8 using the content-type charset (and any HTML
 	// meta charset), mirroring httpx's response.text behaviour.
-	decoded, err := charset.NewReader(resp.Body, contentType)
+	decoded, err := charset.NewReader(bytes.NewReader(bodyBytes), contentType)
 	if err != nil {
-		decoded = resp.Body
+		decoded = bytes.NewReader(bodyBytes)
 	}
 	raw, err := io.ReadAll(decoded)
 	if err != nil {
@@ -244,6 +267,41 @@ func yamlQuote(s string) string {
 		"\t", " ",
 	).Replace(s)
 	return `"` + s + `"`
+}
+
+// isPDF reports whether the response is a PDF, by content-type or the "%PDF-"
+// magic bytes (which also catches PDFs served as application/octet-stream).
+func isPDF(contentType string, body []byte) bool {
+	if strings.Contains(contentType, "application/pdf") ||
+		strings.Contains(contentType, "application/x-pdf") {
+		return true
+	}
+	return bytes.HasPrefix(body, []byte("%PDF-"))
+}
+
+// extractPDFText extracts the plain text of a PDF using a pure-Go parser. The
+// parser can panic on malformed input, so a recover converts that into an error
+// (callers with a headless-browser fallback treat a non-nil error as "try the
+// fallback").
+func extractPDFText(body []byte) (text string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("pdf parse panicked: %v", r)
+		}
+	}()
+	reader, err := pdf.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return "", err
+	}
+	plain, err := reader.GetPlainText()
+	if err != nil {
+		return "", err
+	}
+	var sb strings.Builder
+	if _, err := io.Copy(&sb, plain); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(sb.String()), nil
 }
 
 // newHTTPClient builds an HTTP client whose dialer enforces the SSRF guard and
