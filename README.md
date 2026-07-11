@@ -55,6 +55,16 @@ content), and the frontmatter counts as part of the returned content, so
 `StartIndex` / `MaxLength` page over it too. Left `false` (the default), output
 is byte-identical to upstream — see [Fidelity](#fidelity).
 
+### Extension: `ExtractPDF` (off by default)
+
+Upstream returns PDF responses as raw bytes behind a "cannot be simplified"
+note, which is unusable as LLM context. With `Options.ExtractPDF: true`, a PDF
+response (detected by content-type or the `%PDF-` magic bytes) is run through a
+pure-Go text extractor and the extracted text is returned like any other
+content — no subprocess, no sidecar. `Raw` takes precedence: if set, the PDF is
+returned unextracted. Left `false` (the default), the upstream raw-bytes
+behaviour is preserved.
+
 ## Fidelity
 
 The observable contract of the upstream tool is reproduced closely: the

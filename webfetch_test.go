@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -91,6 +92,46 @@ func TestFetch_IncludeMetadata(t *testing.T) {
 	}
 	if strings.Contains(plain, "---\n") || strings.Contains(plain, "title:") {
 		t.Fatalf("default output must not contain frontmatter, got:\n%s", plain)
+	}
+}
+
+func TestFetch_ExtractPDF(t *testing.T) {
+	allowLoopback(t)
+	pdfBytes, err := os.ReadFile("testdata/sample.pdf")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Write(pdfBytes)
+	}))
+	defer srv.Close()
+
+	// ExtractPDF=true -> the marker text embedded in the fixture is returned.
+	out, err := Fetch(context.Background(), srv.URL+"/doc.pdf", Options{ExtractPDF: true})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if !strings.HasPrefix(out, fmt.Sprintf("Contents of %s/doc.pdf:\n", srv.URL)) {
+		t.Fatalf("missing wrapper prefix, got:\n%s", out)
+	}
+	if !strings.Contains(out, "ZEBRA-42") {
+		t.Fatalf("expected extracted PDF text, got:\n%s", out)
+	}
+	if strings.Contains(out, "cannot be simplified") {
+		t.Fatalf("extracted PDF should not carry the raw-content note, got:\n%s", out)
+	}
+
+	// Default (ExtractPDF=false) -> upstream behaviour: raw bytes behind the note.
+	plain, err := Fetch(context.Background(), srv.URL+"/doc.pdf", Options{})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if !strings.Contains(plain, "Content type application/pdf cannot be simplified to markdown") {
+		t.Fatalf("default must keep the raw-content note for PDFs, got a different shape")
+	}
+	if strings.Contains(plain, "ZEBRA-42") {
+		t.Fatalf("default must not extract PDF text")
 	}
 }
 
