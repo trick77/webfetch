@@ -1,13 +1,12 @@
-// Package webfetch is a faithful, dependency-light Go port of the reference
-// Python "mcp-server-fetch" tool (github.com/modelcontextprotocol/servers,
-// src/fetch). It fetches a URL, optionally extracts the
-// page's main content as Markdown, honours robots.txt for autonomous fetches,
-// and returns text ready to hand to an LLM.
+// Package webfetch is a dependency-light Go port of the reference Python
+// "mcp-server-fetch" tool (github.com/modelcontextprotocol/servers, src/fetch).
+// It fetches a URL, optionally extracts the page's main content as Markdown, and
+// returns text ready to hand to an LLM.
 //
-// The observable contract of the upstream tool is reproduced exactly: the
-// autonomous User-Agent string, robots.txt handling (including its HTTP
-// status-code branches), the HTML/raw content-type heuristic, the "Contents of
-// <url>:" wrapper, and the truncation / error strings.
+// The observable contract of the upstream tool is reproduced closely: the
+// autonomous User-Agent string, the HTML/raw content-type heuristic, the
+// "Contents of <url>:" wrapper, and the truncation / error strings. It
+// deliberately does NOT enforce robots.txt (unlike upstream), by design.
 //
 // The one unavoidable deviation is content extraction: upstream runs Mozilla
 // Readability.js in a Node subprocess (readabilipy use_readability=True) plus
@@ -33,7 +32,6 @@ import (
 
 	readability "codeberg.org/readeck/go-readability/v2"
 	md "github.com/JohannesKaufmann/html-to-markdown"
-	"github.com/temoto/robotstxt"
 	"golang.org/x/net/html/charset"
 )
 
@@ -58,20 +56,18 @@ type Options struct {
 	Raw bool
 	// UserAgent overrides the autonomous User-Agent. Empty uses the default.
 	UserAgent string
-	// IgnoreRobots skips the robots.txt check. The reference container does not
-	// set this, so it defaults to false (robots honoured).
-	IgnoreRobots bool
 }
 
-// Fetch reproduces the upstream fetch tool's call_tool: it honours robots.txt
-// (unless IgnoreRobots), fetches the URL, extracts/keeps the content, applies
-// start_index/max_length paging, and returns the text wrapped exactly as
-// upstream does ("<prefix>Contents of <url>:\n<content>").
+// Fetch reproduces the upstream fetch tool's call_tool: it fetches the URL,
+// extracts/keeps the content, applies start_index/max_length paging, and returns
+// the text wrapped exactly as upstream does ("<prefix>Contents of <url>:\n<content>").
 //
-// It returns a non-nil error on the same conditions upstream raises McpError
-// (robots denial, connection failure, HTTP status >= 400). Callers that have an
-// alternate reader (e.g. a headless-browser fallback) should treat a non-nil
-// error as "try the fallback".
+// Unlike upstream, it does NOT enforce robots.txt. Outbound connections are
+// still restricted to public IPs by the SSRF guard in the dialer.
+//
+// It returns a non-nil error on connection failure or HTTP status >= 400.
+// Callers that have an alternate reader (e.g. a headless-browser fallback)
+// should treat a non-nil error as "try the fallback".
 func Fetch(ctx context.Context, rawURL string, opts Options) (string, error) {
 	if strings.TrimSpace(rawURL) == "" {
 		return "", fmt.Errorf("URL is required")
@@ -87,12 +83,6 @@ func Fetch(ctx context.Context, rawURL string, opts Options) (string, error) {
 	startIndex := opts.StartIndex
 	if startIndex < 0 {
 		startIndex = 0
-	}
-
-	if !opts.IgnoreRobots {
-		if err := checkMayAutonomouslyFetchURL(ctx, rawURL, userAgent); err != nil {
-			return "", err
-		}
 	}
 
 	content, prefix, err := fetchURL(ctx, rawURL, userAgent, opts.Raw)
@@ -125,78 +115,6 @@ func Fetch(ctx context.Context, rawURL string, opts Options) (string, error) {
 		}
 	}
 	return fmt.Sprintf("%sContents of %s:\n%s", prefix, rawURL, out), nil
-}
-
-// robotsTxtURL reconstructs scheme://host/robots.txt for a URL.
-func robotsTxtURL(rawURL string) (string, error) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "", err
-	}
-	robots := &url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/robots.txt"}
-	return robots.String(), nil
-}
-
-// checkMayAutonomouslyFetchURL enforces robots.txt for autonomous fetches,
-// mirroring upstream's status-code handling and error messages.
-func checkMayAutonomouslyFetchURL(ctx context.Context, rawURL, userAgent string) error {
-	robotURL, err := robotsTxtURL(rawURL)
-	if err != nil {
-		return fmt.Errorf("Failed to fetch robots.txt %s due to a connection issue", robotURL)
-	}
-
-	// Upstream uses httpx's default 5s timeout for the robots.txt request.
-	client := newHTTPClient(5 * time.Second)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, robotURL, nil)
-	if err != nil {
-		return fmt.Errorf("Failed to fetch robots.txt %s due to a connection issue", robotURL)
-	}
-	req.Header.Set("User-Agent", userAgent)
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("Failed to fetch robots.txt %s due to a connection issue", robotURL)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		return fmt.Errorf("When fetching robots.txt (%s), received status %d so assuming that autonomous fetching is not allowed, the user can try manually fetching by using the fetch prompt", robotURL, resp.StatusCode)
-	}
-	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-		return nil
-	}
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("Failed to fetch robots.txt %s due to a connection issue", robotURL)
-	}
-	// Strip comment lines before parsing, matching upstream.
-	var kept []string
-	for _, line := range strings.Split(string(bodyBytes), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "#") {
-			continue
-		}
-		kept = append(kept, line)
-	}
-	robots, err := robotstxt.FromBytes([]byte(strings.Join(kept, "\n")))
-	if err != nil {
-		// A malformed robots.txt is treated as permissive (Protego parses
-		// leniently); do not block the fetch on a parse error.
-		return nil
-	}
-	testPath := rawURL
-	if u, perr := url.Parse(rawURL); perr == nil {
-		if ru := u.RequestURI(); ru != "" {
-			testPath = ru
-		}
-	}
-	if !robots.TestAgent(testPath, userAgent) {
-		return fmt.Errorf("The sites robots.txt (%s), specifies that autonomous fetching of this page is not allowed, "+
-			"<useragent>%s</useragent>\n<url>%s</url><robots>\n%s\n</robots>\n"+
-			"The assistant must let the user know that it failed to view the page. The assistant may provide further guidance based on the above information.\n"+
-			"The assistant can tell the user that they can try manually fetching the page by using the fetch prompt within their UI.",
-			robotURL, userAgent, rawURL, string(bodyBytes))
-	}
-	return nil
 }
 
 // fetchURL fetches the URL and returns (content, prefix). content is either

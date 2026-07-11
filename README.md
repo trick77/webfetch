@@ -5,8 +5,8 @@ A dependency-light Go port of the reference Python
 tool.
 
 It fetches a URL, extracts the main content as Markdown (or returns raw HTML),
-honours `robots.txt` for autonomous fetches, and returns text ready to hand to
-an LLM — all **in-process**, with no Node subprocess and no sidecar container.
+and returns text ready to hand to an LLM — all **in-process**, with no Node
+subprocess and no sidecar container.
 
 ```go
 out, err := webfetch.Fetch(ctx, "https://example.com/article", webfetch.Options{
@@ -16,12 +16,28 @@ out, err := webfetch.Fetch(ctx, "https://example.com/article", webfetch.Options{
 })
 ```
 
+## Tool
+
+The module exposes a single tool, equivalent to upstream `mcp-server-fetch`:
+
+**`fetch`** — Fetches a URL from the internet and extracts its contents as
+markdown.
+
+| Parameter     | Type    | Required | Default | Description                                        |
+| ------------- | ------- | -------- | ------- | -------------------------------------------------- |
+| `url`         | string  | yes      | —       | URL to fetch                                       |
+| `max_length`  | integer | no       | `5000`  | Maximum number of characters to return             |
+| `start_index` | integer | no       | `0`     | Start content from this character index            |
+| `raw`         | boolean | no       | `false` | Get raw content without markdown conversion        |
+
+(`webfetch.Fetch` maps these to the `Options` fields `MaxLength`, `StartIndex`,
+and `Raw`.)
+
 ## Fidelity
 
-The observable contract of the upstream tool is reproduced exactly: the
-autonomous `User-Agent`, robots.txt handling (including its HTTP status-code
-branches), the HTML/raw content-type heuristic, the `Contents of <url>:`
-wrapper, and the truncation / error strings.
+The observable contract of the upstream tool is reproduced closely: the
+autonomous `User-Agent`, the HTML/raw content-type heuristic, the
+`Contents of <url>:` wrapper, and the truncation / error strings.
 
 Content extraction is the one place byte-for-byte parity is impossible: upstream
 runs Mozilla Readability.js in a Node subprocess (`readabilipy`) plus
@@ -34,10 +50,28 @@ emphasis). On typical pages the output is byte-identical; the only observed
 difference is readability's URL normalization (e.g. a trailing slash added to
 bare links).
 
-## SSRF protection
+### Difference from upstream: robots.txt
 
-The upstream deployment isolated the fetch sidecar on its own Docker network so
-model-chosen URLs could not reach internal hosts. Running in-process, that
-protection is instead enforced in the dialer: connections to loopback, RFC1918,
-link-local (including the `169.254.169.254` metadata endpoint), unspecified, and
-multicast addresses are refused after DNS resolution.
+Unlike `mcp-server-fetch`, this module **does not enforce `robots.txt`** — it
+fetches the requested URL directly. This is a deliberate policy choice.
+
+## SSRF protection: only public IPs are reachable
+
+By default the fetcher can reach **only globally-routable public unicast
+addresses**. This directly addresses the standard fetch-server caveat that such
+a tool "can access local/internal IP addresses and may represent a security
+risk": here it cannot.
+
+Enforcement is in the dialer (`net.Dialer.Control`), so it runs **after DNS
+resolution** against the concrete IP the socket will connect to — which also
+covers HTTP redirects (every hop is re-dialed and re-checked) and DNS-rebinding
+(the resolved IP is what's validated, not the hostname). It is a strict
+default-deny allowlist; the following are refused:
+
+- loopback (`127.0.0.0/8`, `::1`) and unspecified (`0.0.0.0`, `::`)
+- private (`10/8`, `172.16/12`, `192.168/16`) and IPv6 ULA (`fc00::/7`)
+- carrier-grade NAT (`100.64.0.0/10`)
+- link-local, including the cloud metadata endpoint `169.254.169.254`
+- broadcast, multicast, and IANA special-use / documentation / benchmarking
+  ranges
+- IPv4-mapped IPv6 forms of any of the above (normalized before checking)

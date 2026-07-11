@@ -23,10 +23,6 @@ func allowLoopback(t *testing.T) {
 func TestFetch_HTMLToMarkdown(t *testing.T) {
 	allowLoopback(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/robots.txt" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, `<!doctype html><html><head><title>T</title></head><body>
 			<article><h1>Hello World</h1><p>This is the main content of the article that readability should keep because it is long enough to be considered the primary body text of the page.</p></article>
@@ -53,10 +49,6 @@ func TestFetch_RawSkipsSimplification(t *testing.T) {
 	allowLoopback(t)
 	body := `<!doctype html><html><body><article><h1>Hi</h1><p>Body body body body body body body body body.</p></article></body></html>`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/robots.txt" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, body)
 	}))
@@ -74,10 +66,6 @@ func TestFetch_RawSkipsSimplification(t *testing.T) {
 func TestFetch_NonHTMLPrefix(t *testing.T) {
 	allowLoopback(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/robots.txt" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"key":"value"}`)
 	}))
@@ -97,12 +85,7 @@ func TestFetch_NonHTMLPrefix(t *testing.T) {
 
 func TestFetch_Truncation(t *testing.T) {
 	allowLoopback(t)
-	// 20 chars of plain text via a non-HTML type so content == body exactly.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/robots.txt" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprint(w, "ABCDEFGHIJ") // 10 chars
 	}))
@@ -129,55 +112,14 @@ func TestFetch_Truncation(t *testing.T) {
 	}
 }
 
-func TestFetch_RobotsDisallow(t *testing.T) {
+func TestFetch_NoRobotsEnforcement(t *testing.T) {
 	allowLoopback(t)
+	// robots.txt forbids everything; webfetch must ignore it entirely and never
+	// even request /robots.txt.
+	robotsRequested := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/robots.txt" {
-			w.Header().Set("Content-Type", "text/plain")
-			fmt.Fprint(w, "User-agent: *\nDisallow: /secret\n")
-			return
-		}
-		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, "<html><body><p>secret</p></body></html>")
-	}))
-	defer srv.Close()
-
-	_, err := Fetch(context.Background(), srv.URL+"/secret/page", Options{})
-	if err == nil {
-		t.Fatalf("expected robots.txt to block the fetch")
-	}
-	if !strings.Contains(err.Error(), "robots.txt") || !strings.Contains(err.Error(), "not allowed") {
-		t.Fatalf("unexpected robots error: %v", err)
-	}
-
-	// A path not disallowed should be allowed.
-	if _, err := Fetch(context.Background(), srv.URL+"/public/page", Options{}); err != nil {
-		t.Fatalf("public path should be allowed, got: %v", err)
-	}
-}
-
-func TestFetch_Robots403BlocksAutonomous(t *testing.T) {
-	allowLoopback(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/robots.txt" {
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, "<html><body>x</body></html>")
-	}))
-	defer srv.Close()
-
-	_, err := Fetch(context.Background(), srv.URL+"/p", Options{})
-	if err == nil || !strings.Contains(err.Error(), "status 403") {
-		t.Fatalf("expected 403 robots block, got: %v", err)
-	}
-}
-
-func TestFetch_IgnoreRobots(t *testing.T) {
-	allowLoopback(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/robots.txt" {
+			robotsRequested = true
 			w.Header().Set("Content-Type", "text/plain")
 			fmt.Fprint(w, "User-agent: *\nDisallow: /\n")
 			return
@@ -187,22 +129,21 @@ func TestFetch_IgnoreRobots(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	out, err := Fetch(context.Background(), srv.URL+"/anything", Options{IgnoreRobots: true})
+	out, err := Fetch(context.Background(), srv.URL+"/anything", Options{})
 	if err != nil {
-		t.Fatalf("IgnoreRobots should bypass robots.txt, got: %v", err)
+		t.Fatalf("Fetch must not enforce robots.txt, got: %v", err)
 	}
 	if !strings.Contains(out, "hello") {
 		t.Fatalf("expected body, got:\n%s", out)
+	}
+	if robotsRequested {
+		t.Fatal("webfetch must not request /robots.txt")
 	}
 }
 
 func TestFetch_HTTPError(t *testing.T) {
 	allowLoopback(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/robots.txt" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -213,17 +154,32 @@ func TestFetch_HTTPError(t *testing.T) {
 	}
 }
 
-func TestSSRF_GuardRejectsPrivate(t *testing.T) {
+func TestSSRF_GuardAllowsOnlyPublic(t *testing.T) {
 	blocked := []string{
-		"127.0.0.1:80", "[::1]:80", "10.1.2.3:443", "192.168.1.1:80",
-		"172.16.0.1:80", "169.254.169.254:80", "0.0.0.0:80",
+		"127.0.0.1:80",          // loopback
+		"[::1]:80",              // loopback v6
+		"10.1.2.3:443",          // RFC1918
+		"192.168.1.1:80",        // RFC1918
+		"172.16.0.1:80",         // RFC1918
+		"100.64.0.1:80",         // CGNAT
+		"169.254.169.254:80",    // link-local metadata endpoint
+		"0.0.0.0:80",            // this-host
+		"255.255.255.255:80",    // broadcast
+		"224.0.0.1:80",          // multicast
+		"198.18.0.1:80",         // benchmarking
+		"192.0.2.1:80",          // TEST-NET-1
+		"203.0.113.5:80",        // TEST-NET-3
+		"[fc00::1]:80",          // IPv6 ULA
+		"[fe80::1]:80",          // IPv6 link-local
+		"[2001:db8::1]:80",      // IPv6 documentation
+		"[::ffff:127.0.0.1]:80", // IPv4-mapped loopback (bypass attempt)
 	}
 	for _, addr := range blocked {
 		if err := guardedControl("tcp", addr, nil); err == nil {
 			t.Errorf("expected %s to be blocked", addr)
 		}
 	}
-	allowed := []string{"1.1.1.1:443", "8.8.8.8:53", "93.184.216.34:80"}
+	allowed := []string{"1.1.1.1:443", "8.8.8.8:53", "93.184.216.34:80", "[2606:4700:4700::1111]:443"}
 	for _, addr := range allowed {
 		if err := guardedControl("tcp", addr, nil); err != nil {
 			t.Errorf("expected %s to be allowed, got: %v", addr, err)
@@ -238,7 +194,7 @@ func TestFetch_SSRFBlocksLoopbackEndToEnd(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := Fetch(context.Background(), srv.URL+"/x", Options{IgnoreRobots: true})
+	_, err := Fetch(context.Background(), srv.URL+"/x", Options{})
 	if err == nil || !strings.Contains(err.Error(), "non-public") {
 		t.Fatalf("expected SSRF dial refusal, got: %v", err)
 	}
