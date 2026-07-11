@@ -33,6 +33,10 @@ and the truncation / error strings — but:
 - **Content metadata** (opt-in `IncludeMetadata`). Optional
   title/author/date/site/language frontmatter — not offered upstream.
   → [Extension: `IncludeMetadata`](#extension-includemetadata-off-by-default)
+- **Full-page & selector escape hatch** (opt-in `FullPage` / `Selector` /
+  `ExcludeSelectors`). Steer or bypass Readability when it over-strips — upstream
+  is main-content-or-raw only.
+  → [Extension: escape hatch](#extension-full-page--selector-escape-hatch-off-by-default)
 - **Pure-Go extraction pipeline.** `go-readability` + `html-to-markdown` in place
   of upstream's Node `readabilipy` + `markdownify`; output is byte-identical on
   typical pages. → [Fidelity](#fidelity)
@@ -91,6 +95,24 @@ pure-Go text extractor and the extracted text is returned like any other
 content — no subprocess, no sidecar. `Raw` takes precedence: if set, the PDF is
 returned unextracted. Left `false` (the default), the upstream raw-bytes
 behaviour is preserved.
+
+### Extension: full-page & selector escape hatch (off by default)
+
+When Readability over-strips (docs pages, tables, sidebars you actually want),
+three opt-in `Options` let you bypass or steer it:
+
+- `FullPage: true` — convert the **entire page** to Markdown, skipping the
+  Readability main-content extraction.
+- `Selector: "<css>"` — convert only the element(s) matching a CSS selector
+  (takes precedence over `FullPage`). No match yields the content
+  `<error>No content matched the selector.</error>` (with a nil error).
+- `ExcludeSelectors: []string{"<css>", …}` — remove matching element(s) before
+  conversion. Unlike the other two it **composes with every mode**, including the
+  default Readability path (e.g. strip a cookie banner, then simplify).
+
+`Raw` still takes precedence over all three, and `IncludeMetadata` is not applied
+on the `FullPage` / `Selector` paths. With all of them unset (the default),
+output is byte-identical to upstream.
 
 ## Fidelity
 

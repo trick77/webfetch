@@ -32,6 +32,7 @@ import (
 
 	readability "codeberg.org/readeck/go-readability/v2"
 	md "github.com/JohannesKaufmann/html-to-markdown"
+	"github.com/PuerkitoBio/goquery"
 	"github.com/ledongthuc/pdf"
 	"golang.org/x/net/html/charset"
 )
@@ -73,6 +74,24 @@ type Options struct {
 	// subprocess). Raw takes precedence: if Raw is set, the PDF is returned
 	// unextracted. Default false, preserving the upstream raw-bytes behaviour.
 	ExtractPDF bool
+	// FullPage converts the entire page to Markdown, skipping the Readability
+	// main-content extraction. Use it when Readability over-strips (docs pages,
+	// tables, sidebars you actually want). Ignored when Selector is set, and when
+	// Raw is set. IncludeMetadata is not applied on this path. Default false.
+	FullPage bool
+	// Selector, when set, converts only the element(s) matching this CSS selector
+	// to Markdown, skipping Readability (an escape hatch for targeting a specific
+	// region). Takes precedence over FullPage. Ignored when Raw is set.
+	// IncludeMetadata is not applied on this path. If nothing matches, the content
+	// is the "<error>No content matched the selector.</error>" sentinel (with a
+	// nil error). Default "".
+	Selector string
+	// ExcludeSelectors removes element(s) matching these CSS selectors before
+	// conversion. Unlike FullPage/Selector it composes with every non-raw mode,
+	// including the default Readability path (e.g. strip a cookie banner, then
+	// simplify). Empty (the default) leaves the input untouched, so output stays
+	// byte-identical to upstream. Ignored when Raw is set.
+	ExcludeSelectors []string
 }
 
 // Fetch fetches the URL, extracts/keeps the content, applies
@@ -100,7 +119,7 @@ func Fetch(ctx context.Context, rawURL string, opts Options) (string, error) {
 		startIndex = 0
 	}
 
-	content, prefix, err := fetchURL(ctx, rawURL, userAgent, opts.Raw, opts.IncludeMetadata, opts.ExtractPDF)
+	content, prefix, err := fetchURL(ctx, rawURL, userAgent, opts)
 	if err != nil {
 		return "", err
 	}
@@ -135,7 +154,7 @@ func Fetch(ctx context.Context, rawURL string, opts Options) (string, error) {
 // fetchURL fetches the URL and returns (content, prefix). content is either
 // extracted Markdown or the raw body; prefix is the non-empty note prepended
 // for non-simplifiable content types, matching upstream.
-func fetchURL(ctx context.Context, rawURL, userAgent string, forceRaw, includeMetadata, extractPDF bool) (string, string, error) {
+func fetchURL(ctx context.Context, rawURL, userAgent string, opts Options) (string, string, error) {
 	client := newHTTPClient(30 * time.Second)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -159,7 +178,7 @@ func fetchURL(ctx context.Context, rawURL, userAgent string, forceRaw, includeMe
 
 	// PDF handling runs on the raw bytes, before charset decoding (which would
 	// corrupt binary content). Raw takes precedence, matching the option's doc.
-	if extractPDF && !forceRaw && isPDF(contentType, bodyBytes) {
+	if opts.ExtractPDF && !opts.Raw && isPDF(contentType, bodyBytes) {
 		text, err := extractPDFText(bodyBytes)
 		if err != nil {
 			return "", "", fmt.Errorf("Failed to extract PDF %s: %v", rawURL, err)
@@ -187,8 +206,8 @@ func fetchURL(ctx context.Context, rawURL, userAgent string, forceRaw, includeMe
 		strings.Contains(contentType, "text/html") ||
 		contentType == ""
 
-	if isPageHTML && !forceRaw {
-		return extractContentFromHTML(pageRaw, rawURL, includeMetadata), "", nil
+	if isPageHTML && !opts.Raw {
+		return extractContentFromHTML(pageRaw, rawURL, opts), "", nil
 	}
 	return pageRaw, fmt.Sprintf("Content type %s cannot be simplified to markdown, but here is the raw content:\n", contentType), nil
 }
@@ -196,7 +215,31 @@ func fetchURL(ctx context.Context, rawURL, userAgent string, forceRaw, includeMe
 // extractContentFromHTML extracts the main article content and converts it to
 // Markdown, mirroring upstream's readabilipy + markdownify(ATX). On extraction
 // failure it returns the same error sentinel upstream returns.
-func extractContentFromHTML(html, rawURL string, includeMetadata bool) string {
+func extractContentFromHTML(html, rawURL string, opts Options) string {
+	// Escape-hatch pre-pass. ExcludeSelectors composes with every mode (including
+	// the default Readability path); Selector / FullPage skip Readability. When
+	// none are set this block is skipped entirely and the output is byte-identical
+	// to upstream.
+	if len(opts.ExcludeSelectors) > 0 || opts.Selector != "" || opts.FullPage {
+		doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+		if err != nil {
+			return "<error>Page failed to be simplified from HTML</error>"
+		}
+		for _, sel := range opts.ExcludeSelectors {
+			if sel = strings.TrimSpace(sel); sel != "" {
+				doc.Find(sel).Remove()
+			}
+		}
+		if opts.Selector != "" || opts.FullPage {
+			return selectorMarkdown(doc, rawURL, opts)
+		}
+		// ExcludeSelectors only: re-serialize the pruned document and fall through
+		// to the normal Readability path below.
+		if cleaned, err := doc.Html(); err == nil {
+			html = cleaned
+		}
+	}
+
 	var base *url.URL
 	if u, err := url.Parse(rawURL); err == nil {
 		base = u
@@ -209,24 +252,71 @@ func extractContentFromHTML(html, rawURL string, includeMetadata bool) string {
 	if err := article.RenderHTML(&cleaned); err != nil || strings.TrimSpace(cleaned.String()) == "" {
 		return "<error>Page failed to be simplified from HTML</error>"
 	}
-	// Markdownify-matching options: ATX headings, "*" bullets and "*" emphasis
-	// delimiter (upstream markdownify's defaults), so simple pages render
-	// identically to the Python tool.
-	converter := md.NewConverter("", true, &md.Options{
-		HeadingStyle:     "atx",
-		BulletListMarker: "*",
-		EmDelimiter:      "*",
-	})
-	markdown, err := converter.ConvertString(cleaned.String())
+	// Empty domain keeps the converter behaviour byte-identical to upstream;
+	// Readability already absolutized links via base.
+	markdown, err := convertHTMLToMarkdown(cleaned.String(), "")
 	if err != nil || strings.TrimSpace(markdown) == "" {
 		return "<error>Page failed to be simplified from HTML</error>"
 	}
-	if includeMetadata {
+	if opts.IncludeMetadata {
 		if fm := articleFrontmatter(article); fm != "" {
 			return fm + markdown
 		}
 	}
 	return markdown
+}
+
+// selectorMarkdown converts a subtree (Selector) or the whole body (FullPage) of
+// an already-pruned document to Markdown, skipping Readability. doc has already
+// had ExcludeSelectors removed.
+func selectorMarkdown(doc *goquery.Document, rawURL string, opts Options) string {
+	var fragment string
+	if opts.Selector != "" {
+		sel := doc.Find(opts.Selector)
+		if sel.Length() == 0 {
+			return "<error>No content matched the selector.</error>"
+		}
+		var b strings.Builder
+		sel.Each(func(_ int, s *goquery.Selection) {
+			if h, err := goquery.OuterHtml(s); err == nil {
+				b.WriteString(h)
+			}
+		})
+		fragment = b.String()
+	} else { // FullPage
+		if body := doc.Find("body"); body.Length() > 0 {
+			fragment, _ = body.Html()
+		} else {
+			fragment, _ = doc.Html()
+		}
+	}
+	// Pass the host so relative links are absolutized, matching what the
+	// Readability path gets from base.
+	markdown, err := convertHTMLToMarkdown(fragment, domainOf(rawURL))
+	if err != nil || strings.TrimSpace(markdown) == "" {
+		return "<error>Page failed to be simplified from HTML</error>"
+	}
+	return markdown
+}
+
+// convertHTMLToMarkdown converts an HTML fragment with the markdownify-matching
+// options (ATX headings, "*" bullets, "*" emphasis). domain, when non-empty,
+// absolutizes root-relative links.
+func convertHTMLToMarkdown(html, domain string) (string, error) {
+	converter := md.NewConverter(domain, true, &md.Options{
+		HeadingStyle:     "atx",
+		BulletListMarker: "*",
+		EmDelimiter:      "*",
+	})
+	return converter.ConvertString(html)
+}
+
+// domainOf returns the host of rawURL, or "" if it cannot be parsed.
+func domainOf(rawURL string) string {
+	if u, err := url.Parse(rawURL); err == nil {
+		return u.Host
+	}
+	return ""
 }
 
 // articleFrontmatter builds a small YAML frontmatter block from the metadata
