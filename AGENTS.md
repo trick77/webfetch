@@ -50,5 +50,5 @@ repurpose or export it.
 - CI tests run on branches/PRs only, never on the master push.
 - Merging to `master` (touching `**.go` / `go.mod` / `go.sum`) auto-mints a
   semver tag via the release workflow — a merge is a release.
-- Dependabot auto-merges patch and minor bumps.
+- Dependabot opens one grouped dependency PR per week; merge it manually after CI passes.
 - All workflow and config files use the `.yaml` extension (never `.yml`).
