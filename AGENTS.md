@@ -7,6 +7,11 @@ a single package at the repo root, no CLI and no server binary. It ports the
 Python `mcp-server-fetch`. Callers use it in-process:
 `webfetch.Fetch(ctx, url, webfetch.Options{...})`.
 
+Staying fully **in-process** — no subprocess, no sidecar container — is the whole
+point of the port. Keep it that way: any new dependency must be pure-Go (the PDF
+path uses a pure-Go parser for exactly this reason), and keep the dependency set
+minimal.
+
 ## Commands
 
 Run all of these before declaring a change done (they mirror CI, in order):
@@ -33,6 +38,12 @@ This library deliberately reproduces the *observable contract* of upstream
   matches Python markdownify defaults; changing it breaks byte-parity
 - rune-based (not byte-based) `start_index` / `max_length` slicing, which matches
   Python `str` slicing
+
+**Extending is fine; diverging by default is not.** Capabilities beyond upstream
+are added as opt-in `Options` fields that default to off, so a zero-value
+`Options` produces byte-identical output. Follow that pattern for anything new.
+Existing extensions: `IncludeMetadata`, `ExtractPDF`, and the `FullPage` /
+`Selector` / `ExcludeSelectors` escape hatch.
 
 ## Hard constraint — SSRF guard (`ssrf.go`)
 
