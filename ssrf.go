@@ -53,6 +53,7 @@ var specialUseRanges = mustParseCIDRs(
 	"203.0.113.0/24",  // TEST-NET-3 (documentation)
 	"240.0.0.0/4",     // reserved / future use (incl. 255.255.255.255)
 	// IPv6
+	"::/96",          // IPv4-compatible IPv6 (deprecated; e.g. ::127.0.0.1)
 	"64:ff9b::/96",   // NAT64
 	"64:ff9b:1::/48", // local-use NAT64
 	"100::/64",       // discard-only

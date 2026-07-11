@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     branches: [master]
+    # Only cut a release for changes that affect the module itself; docs-only or
+    # CI-only commits do not mint a new version.
+    paths:
+      - "**.go"
+      - "go.mod"
+      - "go.sum"
   workflow_dispatch:
     inputs:
       bump:

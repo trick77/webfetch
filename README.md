@@ -50,11 +50,6 @@ emphasis). On typical pages the output is byte-identical; the only observed
 difference is readability's URL normalization (e.g. a trailing slash added to
 bare links).
 
-### Difference from upstream: robots.txt
-
-Unlike `mcp-server-fetch`, this module **does not enforce `robots.txt`** — it
-fetches the requested URL directly. This is a deliberate policy choice.
-
 ## SSRF protection: only public IPs are reachable
 
 By default the fetcher can reach **only globally-routable public unicast

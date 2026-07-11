@@ -5,8 +5,7 @@
 //
 // The observable contract of the upstream tool is reproduced closely: the
 // autonomous User-Agent string, the HTML/raw content-type heuristic, the
-// "Contents of <url>:" wrapper, and the truncation / error strings. It
-// deliberately does NOT enforce robots.txt (unlike upstream), by design.
+// "Contents of <url>:" wrapper, and the truncation / error strings.
 //
 // The one unavoidable deviation is content extraction: upstream runs Mozilla
 // Readability.js in a Node subprocess (readabilipy use_readability=True) plus
@@ -58,12 +57,10 @@ type Options struct {
 	UserAgent string
 }
 
-// Fetch reproduces the upstream fetch tool's call_tool: it fetches the URL,
-// extracts/keeps the content, applies start_index/max_length paging, and returns
-// the text wrapped exactly as upstream does ("<prefix>Contents of <url>:\n<content>").
-//
-// Unlike upstream, it does NOT enforce robots.txt. Outbound connections are
-// still restricted to public IPs by the SSRF guard in the dialer.
+// Fetch fetches the URL, extracts/keeps the content, applies
+// start_index/max_length paging, and returns the text wrapped as
+// "<prefix>Contents of <url>:\n<content>". Outbound connections are restricted
+// to public IPs by the SSRF guard in the dialer.
 //
 // It returns a non-nil error on connection failure or HTTP status >= 400.
 // Callers that have an alternate reader (e.g. a headless-browser fallback)
