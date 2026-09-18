@@ -32,9 +32,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      # go-version-file rather than a pinned version, so the release toolchain
+      # cannot drift from what the module itself declares (CI does the same).
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version-file: go.mod
           cache-dependency-path: go.sum
 
       # A Go module tag is only useful if the tagged commit builds, so gate the

@@ -23,8 +23,8 @@ go build ./...
 go test -race ./...
 ```
 
-Go 1.25. There is no Makefile and no golangci-lint — `gofmt` + `go vet` are the
-only style gates.
+The Go version follows the `go` directive in `go.mod`. There is no Makefile and
+no golangci-lint — `gofmt` + `go vet` are the only style gates.
 
 ## Hard constraint — upstream fidelity
 
