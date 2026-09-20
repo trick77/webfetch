@@ -2,7 +2,9 @@ package webfetch
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -23,7 +25,7 @@ func allowLoopback(t *testing.T) {
 
 func TestFetch_HTMLToMarkdown(t *testing.T) {
 	allowLoopback(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, `<!doctype html><html><head><title>T</title></head><body>
 			<article><h1>Hello World</h1><p>This is the main content of the article that readability should keep because it is long enough to be considered the primary body text of the page.</p></article>
@@ -48,7 +50,7 @@ func TestFetch_HTMLToMarkdown(t *testing.T) {
 
 func TestFetch_IncludeMetadata(t *testing.T) {
 	allowLoopback(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, `<!doctype html><html lang="en"><head>
 			<title>Great: Article #1 "quoted"</title>
@@ -101,7 +103,7 @@ func TestFetch_ExtractPDF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/pdf")
 		w.Write(pdfBytes)
 	}))
@@ -144,7 +146,7 @@ func TestFetch_EscapeHatch(t *testing.T) {
 		<p class="drop">DROPMARKER a removable sentence with enough words that readability keeps it by default.</p></article>
 		<footer>FOOTERMARKER copyright</footer>
 		</body></html>`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, page)
 	}))
@@ -219,7 +221,7 @@ func TestFetch_EscapeHatch(t *testing.T) {
 func TestFetch_RawSkipsSimplification(t *testing.T) {
 	allowLoopback(t)
 	body := `<!doctype html><html><body><article><h1>Hi</h1><p>Body body body body body body body body body.</p></article></body></html>`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, body)
 	}))
@@ -236,7 +238,7 @@ func TestFetch_RawSkipsSimplification(t *testing.T) {
 
 func TestFetch_NonHTMLPrefix(t *testing.T) {
 	allowLoopback(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"key":"value"}`)
 	}))
@@ -256,7 +258,7 @@ func TestFetch_NonHTMLPrefix(t *testing.T) {
 
 func TestFetch_Truncation(t *testing.T) {
 	allowLoopback(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprint(w, "ABCDEFGHIJ") // 10 chars
 	}))
@@ -314,7 +316,7 @@ func TestFetch_NoRobotsEnforcement(t *testing.T) {
 
 func TestFetch_HTTPError(t *testing.T) {
 	allowLoopback(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -360,7 +362,7 @@ func TestSSRF_GuardAllowsOnlyPublic(t *testing.T) {
 
 func TestFetch_SSRFBlocksLoopbackEndToEnd(t *testing.T) {
 	// Guard active (not relaxed): a loopback target must be refused at dial.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, "should never be reached")
 	}))
 	defer srv.Close()
@@ -374,3 +376,85 @@ func TestFetch_SSRFBlocksLoopbackEndToEnd(t *testing.T) {
 // compile-time nod that guardedControl matches the Dialer.Control signature.
 var _ func(string, string, syscall.RawConn) error = guardedControl
 var _ = net.IPv4
+
+// The error paths below were previously untested. They assert errors.Is
+// unwrapping too: fetchURL wraps with %w, and a caller distinguishing a
+// context cancellation from a genuine transport failure depends on that.
+
+func TestFetch_InvalidURLRejected(t *testing.T) {
+	allowLoopback(t)
+	// A control character in the URL fails http.NewRequestWithContext before
+	// any connection is attempted.
+	_, err := Fetch(context.Background(), "http://exa\x7fmple.com", Options{})
+	if err == nil {
+		t.Fatal("expected an error for a malformed URL")
+	}
+	if !strings.Contains(err.Error(), "Failed to fetch") {
+		t.Fatalf("unexpected error text: %v", err)
+	}
+}
+
+func TestFetch_ConnectionRefused(t *testing.T) {
+	allowLoopback(t)
+	// Bind then close, so the port is almost certainly free and refuses.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	if cerr := ln.Close(); cerr != nil {
+		t.Fatalf("close: %v", cerr)
+	}
+
+	_, err = Fetch(context.Background(), "http://"+addr, Options{})
+	if err == nil {
+		t.Fatal("expected an error when the connection is refused")
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("transport error was not unwrappable, got: %v", err)
+	}
+}
+
+func TestFetch_TruncatedBodyReportsReadFailure(t *testing.T) {
+	allowLoopback(t)
+	// Content-Length promises 1024 bytes, the handler writes 7 and returns, so
+	// the connection closes short. client.Do has already succeeded by then
+	// (headers and the first bytes are in the socket buffer), which puts the
+	// failure in io.ReadAll deterministically rather than racing the dial.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Content-Length", "1024")
+		if _, werr := w.Write([]byte("partial")); werr != nil {
+			return
+		}
+		w.(http.Flusher).Flush()
+	}))
+	defer srv.Close()
+
+	_, err := Fetch(context.Background(), srv.URL, Options{})
+	if err == nil {
+		t.Fatal("expected an error when the body is truncated")
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("body-read error was not unwrappable, got: %v", err)
+	}
+}
+
+func TestFetch_CorruptPDFReportsExtractionFailure(t *testing.T) {
+	allowLoopback(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		// A valid PDF magic number followed by garbage: isPDF accepts it, the
+		// extractor does not.
+		fmt.Fprint(w, "%PDF-1.4\nnot actually a pdf body")
+	}))
+	defer srv.Close()
+
+	_, err := Fetch(context.Background(), srv.URL, Options{ExtractPDF: true})
+	if err == nil {
+		t.Fatal("expected an error for an undecodable PDF")
+	}
+	if !strings.Contains(err.Error(), "Failed to extract PDF") {
+		t.Fatalf("unexpected error text: %v", err)
+	}
+}

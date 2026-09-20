@@ -154,34 +154,38 @@ func Fetch(ctx context.Context, rawURL string, opts Options) (string, error) {
 // fetchURL fetches the URL and returns (content, prefix). content is either
 // extracted Markdown or the raw body; prefix is the non-empty note prepended
 // for non-simplifiable content types, matching upstream.
+// The capitalized error strings below are upstream's, reproduced verbatim as
+// part of this package's observable contract (see the package doc). ST1005 is
+// suppressed per site rather than in .golangci.yaml, which stays identical
+// across the repo family.
 func fetchURL(ctx context.Context, rawURL, userAgent string, opts Options) (string, string, error) {
 	client := newHTTPClient(30 * time.Second)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return "", "", fmt.Errorf("Failed to fetch %s: %v", rawURL, err)
+		return "", "", fmt.Errorf("Failed to fetch %s: %w", rawURL, err) //nolint:staticcheck // ST1005: upstream contract
 	}
 	req.Header.Set("User-Agent", userAgent)
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("Failed to fetch %s: %v", rawURL, err)
+		return "", "", fmt.Errorf("Failed to fetch %s: %w", rawURL, err) //nolint:staticcheck // ST1005: upstream contract
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
-		return "", "", fmt.Errorf("Failed to fetch %s - status code %d", rawURL, resp.StatusCode)
+		return "", "", fmt.Errorf("Failed to fetch %s - status code %d", rawURL, resp.StatusCode) //nolint:staticcheck // ST1005: upstream contract
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", "", fmt.Errorf("Failed to fetch %s: %v", rawURL, err)
+		return "", "", fmt.Errorf("Failed to fetch %s: %w", rawURL, err) //nolint:staticcheck // ST1005: upstream contract
 	}
 	contentType := resp.Header.Get("content-type")
 
 	// PDF handling runs on the raw bytes, before charset decoding (which would
 	// corrupt binary content). Raw takes precedence, matching the option's doc.
 	if opts.ExtractPDF && !opts.Raw && isPDF(contentType, bodyBytes) {
-		text, err := extractPDFText(bodyBytes)
-		if err != nil {
-			return "", "", fmt.Errorf("Failed to extract PDF %s: %v", rawURL, err)
+		text, pdfErr := extractPDFText(bodyBytes)
+		if pdfErr != nil {
+			return "", "", fmt.Errorf("Failed to extract PDF %s: %w", rawURL, pdfErr) //nolint:staticcheck // ST1005: upstream contract
 		}
 		return text, "", nil
 	}
@@ -194,7 +198,7 @@ func fetchURL(ctx context.Context, rawURL, userAgent string, opts Options) (stri
 	}
 	raw, err := io.ReadAll(decoded)
 	if err != nil {
-		return "", "", fmt.Errorf("Failed to fetch %s: %v", rawURL, err)
+		return "", "", fmt.Errorf("Failed to fetch %s: %w", rawURL, err) //nolint:staticcheck // ST1005: upstream contract
 	}
 	pageRaw := string(raw)
 
@@ -249,7 +253,7 @@ func extractContentFromHTML(html, rawURL string, opts Options) string {
 		return "<error>Page failed to be simplified from HTML</error>"
 	}
 	var cleaned strings.Builder
-	if err := article.RenderHTML(&cleaned); err != nil || strings.TrimSpace(cleaned.String()) == "" {
+	if renderErr := article.RenderHTML(&cleaned); renderErr != nil || strings.TrimSpace(cleaned.String()) == "" {
 		return "<error>Page failed to be simplified from HTML</error>"
 	}
 	// Empty domain keeps the converter behaviour byte-identical to upstream;
