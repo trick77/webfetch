@@ -23,7 +23,7 @@ func allowLoopback(t *testing.T) {
 
 func TestFetch_HTMLToMarkdown(t *testing.T) {
 	allowLoopback(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, `<!doctype html><html><head><title>T</title></head><body>
 			<article><h1>Hello World</h1><p>This is the main content of the article that readability should keep because it is long enough to be considered the primary body text of the page.</p></article>
@@ -48,7 +48,7 @@ func TestFetch_HTMLToMarkdown(t *testing.T) {
 
 func TestFetch_IncludeMetadata(t *testing.T) {
 	allowLoopback(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, `<!doctype html><html lang="en"><head>
 			<title>Great: Article #1 "quoted"</title>
@@ -101,7 +101,7 @@ func TestFetch_ExtractPDF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/pdf")
 		w.Write(pdfBytes)
 	}))
@@ -144,7 +144,7 @@ func TestFetch_EscapeHatch(t *testing.T) {
 		<p class="drop">DROPMARKER a removable sentence with enough words that readability keeps it by default.</p></article>
 		<footer>FOOTERMARKER copyright</footer>
 		</body></html>`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, page)
 	}))
@@ -219,7 +219,7 @@ func TestFetch_EscapeHatch(t *testing.T) {
 func TestFetch_RawSkipsSimplification(t *testing.T) {
 	allowLoopback(t)
 	body := `<!doctype html><html><body><article><h1>Hi</h1><p>Body body body body body body body body body.</p></article></body></html>`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, body)
 	}))
@@ -236,7 +236,7 @@ func TestFetch_RawSkipsSimplification(t *testing.T) {
 
 func TestFetch_NonHTMLPrefix(t *testing.T) {
 	allowLoopback(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"key":"value"}`)
 	}))
@@ -256,7 +256,7 @@ func TestFetch_NonHTMLPrefix(t *testing.T) {
 
 func TestFetch_Truncation(t *testing.T) {
 	allowLoopback(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprint(w, "ABCDEFGHIJ") // 10 chars
 	}))
@@ -314,7 +314,7 @@ func TestFetch_NoRobotsEnforcement(t *testing.T) {
 
 func TestFetch_HTTPError(t *testing.T) {
 	allowLoopback(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -360,7 +360,7 @@ func TestSSRF_GuardAllowsOnlyPublic(t *testing.T) {
 
 func TestFetch_SSRFBlocksLoopbackEndToEnd(t *testing.T) {
 	// Guard active (not relaxed): a loopback target must be refused at dial.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, "should never be reached")
 	}))
 	defer srv.Close()

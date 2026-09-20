@@ -158,30 +158,30 @@ func fetchURL(ctx context.Context, rawURL, userAgent string, opts Options) (stri
 	client := newHTTPClient(30 * time.Second)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return "", "", fmt.Errorf("Failed to fetch %s: %v", rawURL, err)
+		return "", "", fmt.Errorf("Failed to fetch %s: %w", rawURL, err)
 	}
 	req.Header.Set("User-Agent", userAgent)
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("Failed to fetch %s: %v", rawURL, err)
+		return "", "", fmt.Errorf("Failed to fetch %s: %w", rawURL, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return "", "", fmt.Errorf("Failed to fetch %s - status code %d", rawURL, resp.StatusCode)
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", "", fmt.Errorf("Failed to fetch %s: %v", rawURL, err)
+		return "", "", fmt.Errorf("Failed to fetch %s: %w", rawURL, err)
 	}
 	contentType := resp.Header.Get("content-type")
 
 	// PDF handling runs on the raw bytes, before charset decoding (which would
 	// corrupt binary content). Raw takes precedence, matching the option's doc.
 	if opts.ExtractPDF && !opts.Raw && isPDF(contentType, bodyBytes) {
-		text, err := extractPDFText(bodyBytes)
-		if err != nil {
-			return "", "", fmt.Errorf("Failed to extract PDF %s: %v", rawURL, err)
+		text, pdfErr := extractPDFText(bodyBytes)
+		if pdfErr != nil {
+			return "", "", fmt.Errorf("Failed to extract PDF %s: %w", rawURL, pdfErr)
 		}
 		return text, "", nil
 	}
@@ -194,7 +194,7 @@ func fetchURL(ctx context.Context, rawURL, userAgent string, opts Options) (stri
 	}
 	raw, err := io.ReadAll(decoded)
 	if err != nil {
-		return "", "", fmt.Errorf("Failed to fetch %s: %v", rawURL, err)
+		return "", "", fmt.Errorf("Failed to fetch %s: %w", rawURL, err)
 	}
 	pageRaw := string(raw)
 
@@ -249,7 +249,7 @@ func extractContentFromHTML(html, rawURL string, opts Options) string {
 		return "<error>Page failed to be simplified from HTML</error>"
 	}
 	var cleaned strings.Builder
-	if err := article.RenderHTML(&cleaned); err != nil || strings.TrimSpace(cleaned.String()) == "" {
+	if renderErr := article.RenderHTML(&cleaned); renderErr != nil || strings.TrimSpace(cleaned.String()) == "" {
 		return "<error>Page failed to be simplified from HTML</error>"
 	}
 	// Empty domain keeps the converter behaviour byte-identical to upstream;
