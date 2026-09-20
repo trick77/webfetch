@@ -2,6 +2,7 @@ package webfetch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -374,3 +375,85 @@ func TestFetch_SSRFBlocksLoopbackEndToEnd(t *testing.T) {
 // compile-time nod that guardedControl matches the Dialer.Control signature.
 var _ func(string, string, syscall.RawConn) error = guardedControl
 var _ = net.IPv4
+
+// The error paths below were previously untested. They assert errors.Is
+// unwrapping too: fetchURL wraps with %w, and a caller distinguishing a
+// context cancellation from a genuine transport failure depends on that.
+
+func TestFetch_InvalidURLRejected(t *testing.T) {
+	allowLoopback(t)
+	// A control character in the URL fails http.NewRequestWithContext before
+	// any connection is attempted.
+	_, err := Fetch(context.Background(), "http://exa\x7fmple.com", Options{})
+	if err == nil {
+		t.Fatal("expected an error for a malformed URL")
+	}
+	if !strings.Contains(err.Error(), "Failed to fetch") {
+		t.Fatalf("unexpected error text: %v", err)
+	}
+}
+
+func TestFetch_ConnectionRefused(t *testing.T) {
+	allowLoopback(t)
+	// Bind then close, so the port is almost certainly free and refuses.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	if cerr := ln.Close(); cerr != nil {
+		t.Fatalf("close: %v", cerr)
+	}
+
+	_, err = Fetch(context.Background(), "http://"+addr, Options{})
+	if err == nil {
+		t.Fatal("expected an error when the connection is refused")
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("transport error was not unwrappable, got: %v", err)
+	}
+}
+
+func TestFetch_ContextCancelledDuringBodyRead(t *testing.T) {
+	allowLoopback(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Content-Length", "1024")
+		if _, werr := w.Write([]byte("partial")); werr != nil {
+			return
+		}
+		w.(http.Flusher).Flush()
+		// Cancel mid-body so io.ReadAll fails rather than the request setup.
+		cancel()
+		<-ctx.Done()
+	}))
+	defer srv.Close()
+
+	_, err := Fetch(ctx, srv.URL, Options{})
+	if err == nil {
+		t.Fatal("expected an error when the body read is interrupted")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("body-read error was not unwrappable, got: %v", err)
+	}
+}
+
+func TestFetch_CorruptPDFReportsExtractionFailure(t *testing.T) {
+	allowLoopback(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		// A valid PDF magic number followed by garbage: isPDF accepts it, the
+		// extractor does not.
+		fmt.Fprint(w, "%PDF-1.4\nnot actually a pdf body")
+	}))
+	defer srv.Close()
+
+	_, err := Fetch(context.Background(), srv.URL, Options{ExtractPDF: true})
+	if err == nil {
+		t.Fatal("expected an error for an undecodable PDF")
+	}
+	if !strings.Contains(err.Error(), "Failed to extract PDF") {
+		t.Fatalf("unexpected error text: %v", err)
+	}
+}
