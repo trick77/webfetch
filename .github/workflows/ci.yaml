@@ -63,17 +63,20 @@ jobs:
       # fetch-depth: 0. Fetch it explicitly before the gates diff against it.
       - name: Fetch base ref
         run: git fetch --no-tags origin +refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}
+      # The gate scripts decide whether a PR may merge, so they are validated
+      # before they are trusted. Ordering matters: a fail-closed regression in
+      # coverage-gate.sh would abort the job at the gate step, and a self-test
+      # placed after it would never run to explain why.
+      - name: Gate self-tests
+        run: |
+          ./hack/coverage-gate.test.sh
+          ./hack/strip-comment-lines.test.sh
       # The floor gate runs first: when a PR drops the project below the floor
       # the absolute number is the more actionable failure, and reporting it
       # before patch coverage keeps the log readable.
       - run: ./hack/coverage-gate.sh backend
       - name: Backend patch coverage
         run: ./hack/patch-coverage.sh "origin/${{ github.base_ref || 'master' }}"
-      # The gate scripts decide whether a PR may merge, so they get tested too.
-      - name: Gate self-tests
-        run: |
-          ./hack/coverage-gate.test.sh
-          ./hack/strip-comment-lines.test.sh
 
   lint:
     name: golangci-lint

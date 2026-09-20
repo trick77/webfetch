@@ -20,13 +20,6 @@ linters:
     - unparam
     - unused
   settings:
-    staticcheck:
-      # ST1005 (error strings not capitalized) is off here: this package
-      # reproduces upstream mcp-server-fetch's error strings verbatim as part of
-      # its documented observable contract (see the package doc in webfetch.go).
-      checks:
-        - all
-        - -ST1005
     govet:
       enable-all: true
       disable:

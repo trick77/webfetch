@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -414,9 +415,12 @@ func TestFetch_ConnectionRefused(t *testing.T) {
 	}
 }
 
-func TestFetch_ContextCancelledDuringBodyRead(t *testing.T) {
+func TestFetch_TruncatedBodyReportsReadFailure(t *testing.T) {
 	allowLoopback(t)
-	ctx, cancel := context.WithCancel(context.Background())
+	// Content-Length promises 1024 bytes, the handler writes 7 and returns, so
+	// the connection closes short. client.Do has already succeeded by then
+	// (headers and the first bytes are in the socket buffer), which puts the
+	// failure in io.ReadAll deterministically rather than racing the dial.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("Content-Length", "1024")
@@ -424,17 +428,14 @@ func TestFetch_ContextCancelledDuringBodyRead(t *testing.T) {
 			return
 		}
 		w.(http.Flusher).Flush()
-		// Cancel mid-body so io.ReadAll fails rather than the request setup.
-		cancel()
-		<-ctx.Done()
 	}))
 	defer srv.Close()
 
-	_, err := Fetch(ctx, srv.URL, Options{})
+	_, err := Fetch(context.Background(), srv.URL, Options{})
 	if err == nil {
-		t.Fatal("expected an error when the body read is interrupted")
+		t.Fatal("expected an error when the body is truncated")
 	}
-	if !errors.Is(err, context.Canceled) {
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("body-read error was not unwrappable, got: %v", err)
 	}
 }
