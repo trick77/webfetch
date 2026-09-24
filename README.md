@@ -40,12 +40,16 @@ and the truncation / error strings — but:
 - **Pure-Go extraction pipeline.** `go-readability` + `html-to-markdown` in place
   of upstream's Node `readabilipy` + `markdownify`; output is byte-identical on
   typical pages. → [Fidelity](#fidelity)
+- **Response body cap** (`MaxBodyBytes`, default 10 MiB). Upstream buffers
+  bodies of any size; webfetch fails a fetch whose body is over the cap so a
+  model-chosen URL cannot exhaust memory. → [Body cap](#body-cap-maxbodybytes-10-mib-by-default)
 - **No proxy support.** Upstream's `--proxy-url` is intentionally unsupported: a
   proxy would move egress outside the guarded dialer, which is exactly where the
   SSRF check lives.
 
-Both opt-in extensions default to off, so unless you enable them the output stays
-byte-identical to upstream.
+The opt-in extensions default to off, so unless you enable them the output stays
+byte-identical to upstream. The body cap is the one default that is not
+upstream's, and it only changes the outcome for bodies larger than the cap.
 
 ## Tool
 
@@ -66,8 +70,7 @@ and `Raw`.)
 
 ### Extension: `IncludeMetadata` (off by default)
 
-`Options.IncludeMetadata` is the one field beyond the upstream contract. When
-`true`, the extracted Markdown is prefixed with a small YAML frontmatter block
+With `Options.IncludeMetadata: true`, the extracted Markdown is prefixed with a small YAML frontmatter block
 built from metadata Readability already parses — `title`, `author`, `published`,
 `site`, `language` (non-empty fields only):
 
@@ -111,8 +114,21 @@ three opt-in `Options` let you bypass or steer it:
   default Readability path (e.g. strip a cookie banner, then simplify).
 
 `Raw` still takes precedence over all three, and `IncludeMetadata` is not applied
-on the `FullPage` / `Selector` paths. With all of them unset (the default),
-output is byte-identical to upstream.
+on the `FullPage` / `Selector` paths. Relative links are resolved against the
+final URL (after redirects), keeping the page's scheme and directory, as on the
+Readability path. With all of them unset (the default), output is byte-identical
+to upstream.
+
+### Body cap: `MaxBodyBytes` (10 MiB by default)
+
+`Options.MaxBodyBytes` caps the size of the response body. A body larger than
+the cap fails the fetch with a `Failed to fetch <url>: response body exceeds N
+bytes` error before any decoding, so a model-chosen (or prompt-injected) URL to
+a huge file cannot exhaust memory. `0` (the default) applies
+`webfetch.DefaultMaxBodyBytes` (10 MiB); a negative value disables the cap,
+which is upstream's unbounded behaviour. This is the only default that differs
+from upstream, and it only matters for bodies over the cap: anything smaller is
+processed identically.
 
 ## Fidelity
 

@@ -107,8 +107,10 @@ func mustParseCIDRs(cidrs ...string) []*net.IPNet {
 // uses guardedControl.
 var dialControl = guardedControl
 
-// newDialContext returns a DialContext that enforces the SSRF guard.
-func newDialContext() func(ctx context.Context, network, addr string) (net.Conn, error) {
+// dialContext is the shared transport's DialContext. It builds the dialer per
+// call so dialControl is read at dial time: the transport is created once for
+// the process, and the test hook above must still take effect after that.
+func dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	d := &net.Dialer{Control: dialControl}
-	return d.DialContext
+	return d.DialContext(ctx, network, addr)
 }

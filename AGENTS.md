@@ -45,6 +45,12 @@ are added as opt-in `Options` fields that default to off, so a zero-value
 Existing extensions: `IncludeMetadata`, `ExtractPDF`, and the `FullPage` /
 `Selector` / `ExcludeSelectors` escape hatch.
 
+The one deliberate exception is `MaxBodyBytes`: it defaults to a 10 MiB cap
+(`DefaultMaxBodyBytes`), with a negative value meaning unlimited, because an
+in-process fetcher must not let a model-chosen URL exhaust memory. Only bodies
+over the cap behave differently from upstream. Do not "fix" the default back to
+unlimited.
+
 ## Hard constraint — SSRF guard (`ssrf.go`)
 
 Strict default-deny: only globally-routable public unicast IPs may be reached.

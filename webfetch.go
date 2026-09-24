@@ -18,6 +18,12 @@
 // slash added to bare links). Staying in-process (no Node, no subprocess) is
 // also what makes the sidecar container removable, which is the point of this
 // package.
+//
+// Beyond upstream, Options offers opt-in extensions (IncludeMetadata,
+// ExtractPDF, FullPage / Selector / ExcludeSelectors) that default to off, and
+// one deliberate default: MaxBodyBytes caps response bodies at 10 MiB so a
+// model-chosen URL cannot exhaust memory. Only bodies over the cap behave
+// differently from upstream (they fail instead of being read whole).
 package webfetch
 
 import (
@@ -28,7 +34,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	readability "codeberg.org/readeck/go-readability/v2"
 	md "github.com/JohannesKaufmann/html-to-markdown"
@@ -46,6 +54,24 @@ const DefaultUserAgentAutonomous = "ModelContextProtocol/1.0 (Autonomous; +https
 // defaultMaxLength mirrors the upstream Fetch.max_length default.
 const defaultMaxLength = 5000
 
+// DefaultMaxBodyBytes is the response-body cap applied when Options.MaxBodyBytes
+// is zero. Upstream reads bodies unbounded; the cap is a deliberate divergence
+// that only affects bodies larger than this.
+const DefaultMaxBodyBytes = 10 << 20
+
+// fetchTimeout mirrors upstream's httpx timeout=30.
+const fetchTimeout = 30 * time.Second
+
+// maxRedirects mirrors httpx's default max_redirects (Go's default is 10).
+const maxRedirects = 20
+
+// Upstream sentinel strings, reproduced verbatim.
+const (
+	errNoMoreContent = "<error>No more content available.</error>"
+	errSimplify      = "<error>Page failed to be simplified from HTML</error>"
+	errNoSelector    = "<error>No content matched the selector.</error>"
+)
+
 // Options mirror the upstream tool's parameters.
 type Options struct {
 	// MaxLength is the maximum number of characters to return. Zero means the
@@ -58,6 +84,12 @@ type Options struct {
 	Raw bool
 	// UserAgent overrides the autonomous User-Agent. Empty uses the default.
 	UserAgent string
+	// MaxBodyBytes caps the size of the response body. A body larger than the
+	// cap is rejected with a "Failed to fetch" error before any decoding, so a
+	// model-chosen URL cannot exhaust memory. Zero (the default) applies
+	// DefaultMaxBodyBytes (10 MiB); a negative value disables the cap, which is
+	// upstream's unbounded behaviour. Bodies under the cap are unaffected.
+	MaxBodyBytes int64
 	// IncludeMetadata, when true, prepends a small YAML frontmatter block
 	// (title, author, published, site, language — non-empty fields only) ahead
 	// of the extracted Markdown. It applies only to the HTML-simplification path
@@ -99,9 +131,10 @@ type Options struct {
 // "<prefix>Contents of <url>:\n<content>". Outbound connections are restricted
 // to public IPs by the SSRF guard in the dialer.
 //
-// It returns a non-nil error on connection failure or HTTP status >= 400.
-// Callers that have an alternate reader (e.g. a headless-browser fallback)
-// should treat a non-nil error as "try the fallback".
+// It returns a non-nil error on connection failure, HTTP status >= 400, or a
+// response body over MaxBodyBytes. Callers that have an alternate reader (e.g.
+// a headless-browser fallback) should treat a non-nil error as "try the
+// fallback".
 func Fetch(ctx context.Context, rawURL string, opts Options) (string, error) {
 	if strings.TrimSpace(rawURL) == "" {
 		return "", fmt.Errorf("URL is required")
@@ -118,48 +151,47 @@ func Fetch(ctx context.Context, rawURL string, opts Options) (string, error) {
 	if startIndex < 0 {
 		startIndex = 0
 	}
+	// Resolved cap: 0 = default, negative = unlimited (passed on as 0).
+	maxBody := opts.MaxBodyBytes
+	switch {
+	case maxBody == 0:
+		maxBody = DefaultMaxBodyBytes
+	case maxBody < 0:
+		maxBody = 0
+	}
 
-	content, prefix, err := fetchURL(ctx, rawURL, userAgent, opts)
+	content, prefix, err := fetchURL(ctx, rawURL, userAgent, maxBody, opts)
 	if err != nil {
 		return "", err
 	}
 
-	// Character (code-point) indexing, matching Python str slicing.
-	runes := []rune(content)
-	originalLength := len(runes)
-	var out string
-	if startIndex >= originalLength {
-		out = "<error>No more content available.</error>"
-	} else {
-		end := startIndex + maxLength
-		if end > originalLength {
-			end = originalLength
-		}
-		truncated := string(runes[startIndex:end])
-		if truncated == "" {
-			out = "<error>No more content available.</error>"
-		} else {
-			out = truncated
-			actualLen := end - startIndex
-			remaining := originalLength - (startIndex + actualLen)
-			if actualLen == maxLength && remaining > 0 {
-				nextStart := startIndex + actualLen
-				out += fmt.Sprintf("\n\n<error>Content truncated. Call the fetch tool with a start_index of %d to get more content.</error>", nextStart)
-			}
-		}
+	// Character (code-point) indexing, matching Python str slicing. Upstream
+	// checks "start_index >= len(content)" and then "not truncated_content";
+	// with max_length > 0 the second is implied by the first, so one empty
+	// check covers both.
+	out, got, total := sliceRunes(content, startIndex, maxLength)
+	if out == "" {
+		out = errNoMoreContent
+	} else if remaining := total - (startIndex + got); got == maxLength && remaining > 0 {
+		out += fmt.Sprintf("\n\n<error>Content truncated. Call the fetch tool with a start_index of %d to get more content.</error>", startIndex+got)
 	}
 	return fmt.Sprintf("%sContents of %s:\n%s", prefix, rawURL, out), nil
 }
 
 // fetchURL fetches the URL and returns (content, prefix). content is either
-// extracted Markdown or the raw body; prefix is the non-empty note prepended
-// for non-simplifiable content types, matching upstream.
+// extracted Markdown or the raw body, always valid UTF-8; prefix is the
+// non-empty note prepended for non-simplifiable content types, matching
+// upstream. maxBody is the resolved body cap in bytes (0 = unlimited).
 // The capitalized error strings below are upstream's, reproduced verbatim as
 // part of this package's observable contract (see the package doc). ST1005 is
 // suppressed per site rather than in .golangci.yaml, which stays identical
 // across the repo family.
-func fetchURL(ctx context.Context, rawURL, userAgent string, opts Options) (string, string, error) {
-	client := newHTTPClient(30 * time.Second)
+func fetchURL(ctx context.Context, rawURL, userAgent string, maxBody int64, opts Options) (string, string, error) {
+	client := &http.Client{
+		Timeout:       fetchTimeout,
+		Transport:     sharedTransport(),
+		CheckRedirect: checkRedirect,
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return "", "", fmt.Errorf("Failed to fetch %s: %w", rawURL, err) //nolint:staticcheck // ST1005: upstream contract
@@ -174,7 +206,7 @@ func fetchURL(ctx context.Context, rawURL, userAgent string, opts Options) (stri
 		return "", "", fmt.Errorf("Failed to fetch %s - status code %d", rawURL, resp.StatusCode) //nolint:staticcheck // ST1005: upstream contract
 	}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := readBody(resp.Body, maxBody)
 	if err != nil {
 		return "", "", fmt.Errorf("Failed to fetch %s: %w", rawURL, err) //nolint:staticcheck // ST1005: upstream contract
 	}
@@ -190,44 +222,123 @@ func fetchURL(ctx context.Context, rawURL, userAgent string, opts Options) (stri
 		return text, "", nil
 	}
 
-	// Decode the body to UTF-8 using the content-type charset (and any HTML
-	// meta charset), mirroring httpx's response.text behaviour.
-	decoded, err := charset.NewReader(bytes.NewReader(bodyBytes), contentType)
-	if err != nil {
-		decoded = bytes.NewReader(bodyBytes)
-	}
-	raw, err := io.ReadAll(decoded)
+	pageRaw, err := decodeBody(bodyBytes, contentType)
 	if err != nil {
 		return "", "", fmt.Errorf("Failed to fetch %s: %w", rawURL, err) //nolint:staticcheck // ST1005: upstream contract
 	}
-	pageRaw := string(raw)
 
-	head := pageRaw
-	if len(head) > 100 {
-		head = head[:100]
-	}
-	isPageHTML := strings.Contains(head, "<html") ||
+	// Upstream: '"<html" in page_raw[:100]' — a character slice, not bytes.
+	isPageHTML := strings.Contains(firstRunes(pageRaw, 100), "<html") ||
 		strings.Contains(contentType, "text/html") ||
 		contentType == ""
 
 	if isPageHTML && !opts.Raw {
-		return extractContentFromHTML(pageRaw, rawURL, opts), "", nil
+		// Links resolve against the final URL (after redirects); the wrapper
+		// keeps the requested URL, as upstream does.
+		return extractContentFromHTML(pageRaw, resp.Request.URL, opts), "", nil
 	}
 	return pageRaw, fmt.Sprintf("Content type %s cannot be simplified to markdown, but here is the raw content:\n", contentType), nil
 }
 
+// checkRedirect follows up to maxRedirects hops, matching httpx's default
+// rather than net/http's 10.
+func checkRedirect(_ *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	return nil
+}
+
+// readBody reads r in full. With limit > 0 a body longer than limit bytes is
+// rejected (after reading at most limit+1 bytes) rather than buffered whole.
+func readBody(r io.Reader, limit int64) ([]byte, error) {
+	if limit <= 0 {
+		return io.ReadAll(r)
+	}
+	b, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > limit {
+		return nil, fmt.Errorf("response body exceeds %d bytes", limit)
+	}
+	return b, nil
+}
+
+// decodeBody converts the body to a valid UTF-8 string, mirroring httpx's
+// response.text: a charset declared in the Content-Type header (or a BOM, or an
+// HTML meta charset) is honoured; otherwise the body is taken as UTF-8.
+//
+// charset.DetermineEncoding's own last resort is windows-1252, which would turn
+// a UTF-8 body into mojibake whenever the first KiB happens to be pure ASCII.
+// So an uncertain guess is only followed when the body is not valid UTF-8 (a
+// real legacy-encoded page). Valid UTF-8 also skips the decoder copy entirely.
+func decodeBody(body []byte, contentType string) (string, error) {
+	enc, name, certain := charset.DetermineEncoding(body, contentType)
+	if utf8.Valid(body) && (name == "utf-8" || !certain) {
+		return string(body), nil
+	}
+	decoded, err := enc.NewDecoder().Bytes(body)
+	if err != nil {
+		return "", err
+	}
+	// Decoders substitute U+FFFD for undecodable input; enforce the invariant
+	// regardless, since sliceRunes relies on it.
+	return strings.ToValidUTF8(string(decoded), "\uFFFD"), nil
+}
+
+// firstRunes returns the first n runes of s (all of s if shorter).
+func firstRunes(s string, n int) string {
+	for off := range s {
+		if n == 0 {
+			return s[:off]
+		}
+		n--
+	}
+	return s
+}
+
+// sliceRunes returns s[start:start+n] in rune (code-point) terms, the number of
+// runes in that slice, and the total rune count of s. For valid UTF-8 (which
+// fetchURL guarantees) this equals string([]rune(s)[start:start+n]) without
+// materialising a 4-byte-per-rune copy of the whole content. Requires n > 0.
+func sliceRunes(s string, start, n int) (sub string, got, total int) {
+	from, to := -1, -1
+	for off := range s {
+		switch total {
+		case start:
+			from = off
+		case start + n:
+			to = off
+		}
+		total++
+	}
+	if from < 0 {
+		return "", 0, total
+	}
+	if to < 0 {
+		return s[from:], total - start, total
+	}
+	return s[from:to], n, total
+}
+
 // extractContentFromHTML extracts the main article content and converts it to
 // Markdown, mirroring upstream's readabilipy + markdownify(ATX). On extraction
-// failure it returns the same error sentinel upstream returns.
-func extractContentFromHTML(html, rawURL string, opts Options) string {
+// failure it returns the same error sentinel upstream returns. base (may be
+// nil) is the final page URL, used to absolutize links.
+func extractContentFromHTML(page string, base *url.URL, opts Options) string {
+	var (
+		article readability.Article
+		err     error
+	)
 	// Escape-hatch pre-pass. ExcludeSelectors composes with every mode (including
 	// the default Readability path); Selector / FullPage skip Readability. When
 	// none are set this block is skipped entirely and the output is byte-identical
 	// to upstream.
 	if len(opts.ExcludeSelectors) > 0 || opts.Selector != "" || opts.FullPage {
-		doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
-		if err != nil {
-			return "<error>Page failed to be simplified from HTML</error>"
+		doc, perr := goquery.NewDocumentFromReader(strings.NewReader(page))
+		if perr != nil {
+			return errSimplify
 		}
 		for _, sel := range opts.ExcludeSelectors {
 			if sel = strings.TrimSpace(sel); sel != "" {
@@ -235,32 +346,26 @@ func extractContentFromHTML(html, rawURL string, opts Options) string {
 			}
 		}
 		if opts.Selector != "" || opts.FullPage {
-			return selectorMarkdown(doc, rawURL, opts)
+			// Readability absolutizes links itself; do the same here so both
+			// paths agree (scheme, host, and directory of the page).
+			absolutizeLinks(doc, base)
+			return selectorMarkdown(doc, opts)
 		}
-		// ExcludeSelectors only: re-serialize the pruned document and fall through
-		// to the normal Readability path below.
-		if cleaned, err := doc.Html(); err == nil {
-			html = cleaned
-		}
+		// ExcludeSelectors only: hand the pruned tree straight to Readability.
+		article, err = readability.FromDocument(doc.Nodes[0], base)
+	} else {
+		article, err = readability.FromReader(strings.NewReader(page), base)
 	}
-
-	var base *url.URL
-	if u, err := url.Parse(rawURL); err == nil {
-		base = u
-	}
-	article, err := readability.FromReader(strings.NewReader(html), base)
 	if err != nil || article.Node == nil {
-		return "<error>Page failed to be simplified from HTML</error>"
+		return errSimplify
 	}
 	var cleaned strings.Builder
 	if renderErr := article.RenderHTML(&cleaned); renderErr != nil || strings.TrimSpace(cleaned.String()) == "" {
-		return "<error>Page failed to be simplified from HTML</error>"
+		return errSimplify
 	}
-	// Empty domain keeps the converter behaviour byte-identical to upstream;
-	// Readability already absolutized links via base.
-	markdown, err := convertHTMLToMarkdown(cleaned.String(), "")
+	markdown, err := convertHTMLToMarkdown(cleaned.String())
 	if err != nil || strings.TrimSpace(markdown) == "" {
-		return "<error>Page failed to be simplified from HTML</error>"
+		return errSimplify
 	}
 	if opts.IncludeMetadata {
 		if fm := articleFrontmatter(article); fm != "" {
@@ -271,14 +376,14 @@ func extractContentFromHTML(html, rawURL string, opts Options) string {
 }
 
 // selectorMarkdown converts a subtree (Selector) or the whole body (FullPage) of
-// an already-pruned document to Markdown, skipping Readability. doc has already
-// had ExcludeSelectors removed.
-func selectorMarkdown(doc *goquery.Document, rawURL string, opts Options) string {
+// an already-pruned, link-absolutized document to Markdown, skipping
+// Readability.
+func selectorMarkdown(doc *goquery.Document, opts Options) string {
 	var fragment string
 	if opts.Selector != "" {
 		sel := doc.Find(opts.Selector)
 		if sel.Length() == 0 {
-			return "<error>No content matched the selector.</error>"
+			return errNoSelector
 		}
 		var b strings.Builder
 		sel.Each(func(_ int, s *goquery.Selection) {
@@ -294,33 +399,46 @@ func selectorMarkdown(doc *goquery.Document, rawURL string, opts Options) string
 			fragment, _ = doc.Html()
 		}
 	}
-	// Pass the host so relative links are absolutized, matching what the
-	// Readability path gets from base.
-	markdown, err := convertHTMLToMarkdown(fragment, domainOf(rawURL))
+	markdown, err := convertHTMLToMarkdown(fragment)
 	if err != nil || strings.TrimSpace(markdown) == "" {
-		return "<error>Page failed to be simplified from HTML</error>"
+		return errSimplify
 	}
 	return markdown
 }
 
+// absolutizeLinks resolves every relative href/src in doc against base, in
+// place. Absolute references (including data:, mailto: and javascript: URIs)
+// and unparsable values are left untouched. A nil base is a no-op.
+func absolutizeLinks(doc *goquery.Document, base *url.URL) {
+	if base == nil {
+		return
+	}
+	doc.Find("[href], [src]").Each(func(_ int, s *goquery.Selection) {
+		for _, attr := range [...]string{"href", "src"} {
+			raw, ok := s.Attr(attr)
+			if !ok {
+				continue
+			}
+			ref, err := url.Parse(strings.TrimSpace(raw))
+			if err != nil || ref.IsAbs() {
+				continue
+			}
+			s.SetAttr(attr, base.ResolveReference(ref).String())
+		}
+	})
+}
+
 // convertHTMLToMarkdown converts an HTML fragment with the markdownify-matching
-// options (ATX headings, "*" bullets, "*" emphasis). domain, when non-empty,
-// absolutizes root-relative links.
-func convertHTMLToMarkdown(html, domain string) (string, error) {
-	converter := md.NewConverter(domain, true, &md.Options{
+// options (ATX headings, "*" bullets, "*" emphasis). Links are passed through
+// untouched (empty domain): both callers absolutize them beforehand, and the
+// converter's own domain handling would force an "http" scheme.
+func convertHTMLToMarkdown(fragment string) (string, error) {
+	converter := md.NewConverter("", true, &md.Options{
 		HeadingStyle:     "atx",
 		BulletListMarker: "*",
 		EmDelimiter:      "*",
 	})
-	return converter.ConvertString(html)
-}
-
-// domainOf returns the host of rawURL, or "" if it cannot be parsed.
-func domainOf(rawURL string) string {
-	if u, err := url.Parse(rawURL); err == nil {
-		return u.Host
-	}
-	return ""
+	return converter.ConvertString(fragment)
 }
 
 // articleFrontmatter builds a small YAML frontmatter block from the metadata
@@ -395,19 +513,34 @@ func extractPDFText(body []byte) (text string, err error) {
 	if _, err := io.Copy(&sb, plain); err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(sb.String()), nil
+	return strings.ToValidUTF8(strings.TrimSpace(sb.String()), "\uFFFD"), nil
 }
 
-// newHTTPClient builds an HTTP client whose dialer enforces the SSRF guard and
-// which follows redirects (like httpx follow_redirects=True).
-func newHTTPClient(timeout time.Duration) *http.Client {
-	transport := &http.Transport{
-		DialContext:           newDialContext(),
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          10,
-		IdleConnTimeout:       30 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: time.Second,
-	}
-	return &http.Client{Timeout: timeout, Transport: transport}
+var (
+	transportOnce sync.Once
+	transport     *http.Transport
+)
+
+// sharedTransport returns the package-wide HTTP transport, built once. Sharing
+// it across calls reuses connections and TLS sessions instead of stranding an
+// idle keep-alive connection (and its goroutines) per fetch. Its dialer
+// enforces the SSRF guard on every new connection; a pooled connection was
+// validated when it was dialed. Redirects are followed by the client (like
+// httpx follow_redirects=True) and each hop is re-dialed through the guard.
+func sharedTransport() *http.Transport {
+	transportOnce.Do(func() {
+		transport = &http.Transport{
+			// No proxy, deliberately: a proxy would move egress outside the
+			// guarded dialer, which is where the SSRF check lives.
+			Proxy:                 nil,
+			DialContext:           dialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   10,
+			IdleConnTimeout:       30 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: time.Second,
+		}
+	})
+	return transport
 }

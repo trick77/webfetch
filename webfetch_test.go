@@ -1,6 +1,7 @@
 package webfetch
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,10 +9,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
+
+	"github.com/PuerkitoBio/goquery"
 )
 
 // allowLoopback relaxes the SSRF guard so tests can reach the loopback
@@ -20,7 +25,12 @@ func allowLoopback(t *testing.T) {
 	t.Helper()
 	prev := dialControl
 	dialControl = nil
-	t.Cleanup(func() { dialControl = prev })
+	t.Cleanup(func() {
+		dialControl = prev
+		// Drop pooled connections opened while the guard was relaxed so a
+		// guard-on test can never ride one to loopback.
+		sharedTransport().CloseIdleConnections()
+	})
 }
 
 func TestFetch_HTMLToMarkdown(t *testing.T) {
@@ -375,7 +385,6 @@ func TestFetch_SSRFBlocksLoopbackEndToEnd(t *testing.T) {
 
 // compile-time nod that guardedControl matches the Dialer.Control signature.
 var _ func(string, string, syscall.RawConn) error = guardedControl
-var _ = net.IPv4
 
 // The error paths below were previously untested. They assert errors.Is
 // unwrapping too: fetchURL wraps with %w, and a caller distinguishing a
@@ -456,5 +465,360 @@ func TestFetch_CorruptPDFReportsExtractionFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Failed to extract PDF") {
 		t.Fatalf("unexpected error text: %v", err)
+	}
+}
+
+// serve returns an httptest server that answers every request with the given
+// content type and body.
+func serve(t *testing.T, contentType string, body []byte) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if contentType != "" {
+			w.Header().Set("Content-Type", contentType)
+		}
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestFetch_UndeclaredCharsetIsUTF8(t *testing.T) {
+	allowLoopback(t)
+	// Pure ASCII for the first KiB (the charset sniffing window), then UTF-8.
+	// Without a charset the old windows-1252 fallback turned "é" into "Ã©".
+	body := append(bytes.Repeat([]byte("a"), 1200), "é ✓"...)
+	for _, ct := range []string{"text/plain", "application/json", "text/html", ""} {
+		srv := serve(t, ct, body)
+		out, err := Fetch(context.Background(), srv.URL+"/x", Options{Raw: true, MaxLength: 2000})
+		if err != nil {
+			t.Fatalf("[%q] Fetch error: %v", ct, err)
+		}
+		if !strings.Contains(out, "é ✓") {
+			t.Fatalf("[%q] expected UTF-8 to survive, got tail: %q", ct, out[len(out)-20:])
+		}
+	}
+}
+
+func TestFetch_DeclaredAndSniffedLegacyCharset(t *testing.T) {
+	allowLoopback(t)
+	latin1 := []byte("caf\xe9") // "café" in ISO-8859-1 / windows-1252
+	cases := map[string]string{
+		"text/plain; charset=iso-8859-1": "header-declared charset",
+		"text/plain":                     "undeclared, not valid UTF-8: library guess (windows-1252)",
+	}
+	for ct, why := range cases {
+		srv := serve(t, ct, latin1)
+		out, err := Fetch(context.Background(), srv.URL+"/x", Options{})
+		if err != nil {
+			t.Fatalf("[%s] Fetch error: %v", why, err)
+		}
+		if !strings.Contains(out, "café") {
+			t.Fatalf("[%s] expected transcoded text, got:\n%s", why, out)
+		}
+	}
+	// A meta charset on an HTML page, no header charset.
+	srv := serve(t, "text/html", []byte(`<html><head><meta charset="iso-8859-1"></head><body><p>caf`+"\xe9"+`</p></body></html>`))
+	out, err := Fetch(context.Background(), srv.URL+"/x", Options{Raw: true})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if !strings.Contains(out, "café") {
+		t.Fatalf("expected meta charset to be honoured, got:\n%s", out)
+	}
+}
+
+func TestFetch_EmptyBody(t *testing.T) {
+	allowLoopback(t)
+	srv := serve(t, "text/plain", nil)
+	out, err := Fetch(context.Background(), srv.URL+"/empty", Options{})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	want := "Content type text/plain cannot be simplified to markdown, but here is the raw content:\nContents of " + srv.URL + "/empty:\n<error>No more content available.</error>"
+	if out != want {
+		t.Fatalf("unexpected output for empty body:\n%s", out)
+	}
+}
+
+func TestFetch_SelectorPathLinksResolveAgainstPage(t *testing.T) {
+	allowLoopback(t)
+	page := `<!doctype html><html><body><div id="c">
+		<a href="/root">root</a>
+		<a href="rel.html">rel</a>
+		<a href="../up.html">up</a>
+		<img src="//cdn.example/i.png" alt="i">
+		<a href="mailto:a@example.com">mail</a>
+		<a href="https://other.example/abs">abs</a>
+		<a href="data:text/plain,hi">data</a>
+		</div></body></html>`
+	srv := serve(t, "text/html; charset=utf-8", []byte(page))
+
+	for _, opts := range []Options{{Selector: "#c"}, {FullPage: true}} {
+		out, err := Fetch(context.Background(), srv.URL+"/dir/sub/page", opts)
+		if err != nil {
+			t.Fatalf("Fetch error: %v", err)
+		}
+		for _, want := range []string{
+			"(" + srv.URL + "/root)",
+			"(" + srv.URL + "/dir/sub/rel.html)",
+			"(" + srv.URL + "/dir/up.html)",
+			"(http://cdn.example/i.png)", // protocol-relative takes the page scheme
+			"(mailto:a@example.com)",
+			"(https://other.example/abs)",
+			"(data:text/plain,hi)",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("%+v: expected %q in:\n%s", opts, want, out)
+			}
+		}
+	}
+}
+
+func TestAbsolutizeLinks_HTTPSBase(t *testing.T) {
+	// The converter's own domain handling forced "http"; ours keeps the scheme.
+	base, _ := url.Parse("https://example.com/a/b/page.html?q=1")
+	doc, err := goqueryDoc(`<a href="/x">x</a><a href="y">y</a><img src="//h/i.png"><a href="#frag">f</a><a href="javascript:void(0)">j</a>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absolutizeLinks(doc, base)
+	got := []string{}
+	doc.Find("[href], [src]").Each(func(_ int, s *goquery.Selection) {
+		if v, ok := s.Attr("href"); ok {
+			got = append(got, v)
+		}
+		if v, ok := s.Attr("src"); ok {
+			got = append(got, v)
+		}
+	})
+	want := []string{
+		"https://example.com/x",
+		"https://example.com/a/b/y",
+		"https://h/i.png",
+		"https://example.com/a/b/page.html?q=1#frag",
+		"javascript:void(0)",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+
+	// nil base: untouched.
+	doc2, _ := goqueryDoc(`<a href="/x">x</a>`)
+	absolutizeLinks(doc2, nil)
+	if v, _ := doc2.Find("a").Attr("href"); v != "/x" {
+		t.Fatalf("nil base must be a no-op, got %q", v)
+	}
+}
+
+func goqueryDoc(fragment string) (*goquery.Document, error) {
+	return goquery.NewDocumentFromReader(strings.NewReader(fragment))
+}
+
+func TestFetch_RedirectMovesLinkBaseNotWrapper(t *testing.T) {
+	allowLoopback(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/old":
+			http.Redirect(w, r, "/new/dir/page", http.StatusFound)
+		case "/new/dir/page":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			fmt.Fprint(w, `<html><body><div id="c"><a href="rel.html">rel</a></div></body></html>`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	out, err := Fetch(context.Background(), srv.URL+"/old", Options{Selector: "#c"})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if !strings.HasPrefix(out, "Contents of "+srv.URL+"/old:\n") {
+		t.Fatalf("wrapper must keep the requested URL, got:\n%s", out)
+	}
+	if !strings.Contains(out, "("+srv.URL+"/new/dir/rel.html)") {
+		t.Fatalf("relative link must resolve against the final URL, got:\n%s", out)
+	}
+}
+
+func TestFetch_ExcludeSelectorsWithReadabilityBase(t *testing.T) {
+	allowLoopback(t)
+	// ExcludeSelectors-only path now hands the parsed tree to Readability
+	// directly; links must still be absolutized via base as on the plain path.
+	page := `<!doctype html><html><body><article><h1>T</h1>
+		<p class="drop">DROPMARKER enough words here that readability keeps this paragraph around by default.</p>
+		<p>KEEPMARKER the primary body text, long enough to be considered the main content of the page. See <a href="/link">the link</a> for more.</p>
+		</article></body></html>`
+	srv := serve(t, "text/html; charset=utf-8", []byte(page))
+	out, err := Fetch(context.Background(), srv.URL+"/p", Options{ExcludeSelectors: []string{".drop"}})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if strings.Contains(out, "DROPMARKER") || !strings.Contains(out, "KEEPMARKER") {
+		t.Fatalf("unexpected pruning result:\n%s", out)
+	}
+	if !strings.Contains(out, "("+srv.URL+"/link)") {
+		t.Fatalf("expected absolutized link, got:\n%s", out)
+	}
+}
+
+func TestSliceRunes_MatchesRuneSlicing(t *testing.T) {
+	inputs := []string{"", "abc", "héllo wörld ✓✓✓", "日本語のテキスト", "a"}
+	for _, s := range inputs {
+		r := []rune(s)
+		for start := 0; start <= len(r)+1; start++ {
+			for n := 1; n <= len(r)+2; n++ {
+				var want string
+				if start < len(r) {
+					end := min(start+n, len(r))
+					want = string(r[start:end])
+				}
+				got, gotN, total := sliceRunes(s, start, n)
+				if got != want || gotN != len([]rune(want)) || total != len(r) {
+					t.Fatalf("sliceRunes(%q, %d, %d) = (%q, %d, %d), want (%q, %d, %d)",
+						s, start, n, got, gotN, total, want, len([]rune(want)), len(r))
+				}
+			}
+		}
+	}
+}
+
+func TestFirstRunes(t *testing.T) {
+	cases := []struct {
+		s    string
+		n    int
+		want string
+	}{
+		{"", 5, ""},
+		{"abc", 5, "abc"},
+		{"abcdef", 3, "abc"},
+		{"ééé<html", 3, "ééé"},
+		{"ééé<html", 4, "ééé<"},
+		{"abc", 0, ""},
+	}
+	for _, c := range cases {
+		if got := firstRunes(c.s, c.n); got != c.want {
+			t.Errorf("firstRunes(%q, %d) = %q, want %q", c.s, c.n, got, c.want)
+		}
+	}
+}
+
+func TestFetch_HTMLSniffIsCharacterBased(t *testing.T) {
+	allowLoopback(t)
+	// 60 two-byte runes (120 bytes) precede "<html": within upstream's 100
+	// *character* window, outside a 100 *byte* one. No content-type, so only the
+	// sniff decides — but an empty content-type is itself an HTML signal
+	// upstream, so use a non-HTML content type to isolate the sniff.
+	body := strings.Repeat("é", 60) + "<html><body><article><p>SNIFFMARKER the main content of this page, long enough for readability to keep.</p></article></body></html>"
+	srv := serve(t, "application/octet-stream", []byte(body))
+	out, err := Fetch(context.Background(), srv.URL+"/x", Options{})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if strings.Contains(out, "cannot be simplified") {
+		t.Fatalf("expected the page to be sniffed as HTML, got:\n%s", out)
+	}
+	if !strings.Contains(out, "SNIFFMARKER") {
+		t.Fatalf("expected extracted content, got:\n%s", out)
+	}
+}
+
+func TestReadBody_Limit(t *testing.T) {
+	body := bytes.Repeat([]byte("x"), 100)
+	if b, err := readBody(bytes.NewReader(body), 0); err != nil || len(b) != 100 {
+		t.Fatalf("unlimited: got %d bytes, err %v", len(b), err)
+	}
+	if b, err := readBody(bytes.NewReader(body), 100); err != nil || len(b) != 100 {
+		t.Fatalf("exactly at cap must pass: got %d bytes, err %v", len(b), err)
+	}
+	if _, err := readBody(bytes.NewReader(body), 99); err == nil || !strings.Contains(err.Error(), "exceeds 99 bytes") {
+		t.Fatalf("one over cap must fail, got: %v", err)
+	}
+}
+
+func TestFetch_MaxBodyBytes(t *testing.T) {
+	allowLoopback(t)
+	srv := serve(t, "text/plain", bytes.Repeat([]byte("x"), 100))
+
+	_, err := Fetch(context.Background(), srv.URL+"/big", Options{MaxBodyBytes: 50})
+	if err == nil || !strings.Contains(err.Error(), "Failed to fetch") || !strings.Contains(err.Error(), "exceeds 50 bytes") {
+		t.Fatalf("expected body-cap error, got: %v", err)
+	}
+	for _, cap := range []int64{0, -1, 100} {
+		if _, err := Fetch(context.Background(), srv.URL+"/big", Options{MaxBodyBytes: cap}); err != nil {
+			t.Fatalf("MaxBodyBytes=%d should succeed for a 100-byte body: %v", cap, err)
+		}
+	}
+
+	// The default cap is real: one byte over DefaultMaxBodyBytes fails, and the
+	// handler is stopped early rather than streamed to completion.
+	huge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		chunk := bytes.Repeat([]byte("x"), 1<<20)
+		for i := 0; i < 10; i++ {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+		_, _ = w.Write([]byte("x"))
+	}))
+	defer huge.Close()
+	_, err = Fetch(context.Background(), huge.URL+"/huge", Options{})
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeds %d bytes", DefaultMaxBodyBytes)) {
+		t.Fatalf("expected default cap to trigger, got: %v", err)
+	}
+}
+
+func TestFetch_RedirectLimit(t *testing.T) {
+	allowLoopback(t)
+	// /hop/<n>/<target> redirects to n+1 until n == target, then serves text.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var n, target int
+		if _, err := fmt.Sscanf(r.URL.Path, "/hop/%d/%d", &n, &target); err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		if n < target {
+			http.Redirect(w, r, fmt.Sprintf("/hop/%d/%d", n+1, target), http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "landed")
+	}))
+	defer srv.Close()
+
+	// 15 hops exceeds net/http's default of 10 but is within httpx's 20.
+	out, err := Fetch(context.Background(), srv.URL+"/hop/0/15", Options{})
+	if err != nil || !strings.Contains(out, "landed") {
+		t.Fatalf("15 redirects should be followed, got err=%v out=%q", err, out)
+	}
+	_, err = Fetch(context.Background(), srv.URL+"/hop/0/25", Options{})
+	if err == nil || !strings.Contains(err.Error(), "Failed to fetch") || !strings.Contains(err.Error(), "redirects") {
+		t.Fatalf("25 redirects should fail, got: %v", err)
+	}
+}
+
+func TestFetch_ReusesConnections(t *testing.T) {
+	allowLoopback(t)
+	var newConns atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "hi")
+	}))
+	srv.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		if st == http.StateNew {
+			newConns.Add(1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	for i := 0; i < 3; i++ {
+		if _, err := Fetch(context.Background(), srv.URL+"/r", Options{}); err != nil {
+			t.Fatalf("Fetch %d: %v", i, err)
+		}
+	}
+	if got := newConns.Load(); got != 1 {
+		t.Fatalf("expected one pooled connection across sequential fetches, server saw %d", got)
 	}
 }
