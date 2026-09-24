@@ -31,6 +31,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -105,6 +106,7 @@ type Options struct {
 	// bytes behind the "cannot be simplified" note. Extraction is pure-Go (no
 	// subprocess). Raw takes precedence: if Raw is set, the PDF is returned
 	// unextracted. Default false, preserving the upstream raw-bytes behaviour.
+	// MaxBodyBytes applies to PDFs too; raise it for documents over 10 MiB.
 	ExtractPDF bool
 	// FullPage converts the entire page to Markdown, skipping the Readability
 	// main-content extraction. Use it when Readability over-strips (docs pages,
@@ -206,6 +208,9 @@ func fetchURL(ctx context.Context, rawURL, userAgent string, maxBody int64, opts
 		return "", "", fmt.Errorf("Failed to fetch %s - status code %d", rawURL, resp.StatusCode) //nolint:staticcheck // ST1005: upstream contract
 	}
 
+	if maxBody > 0 && resp.ContentLength > maxBody {
+		return "", "", fmt.Errorf("Failed to fetch %s: response body exceeds %d bytes", rawURL, maxBody) //nolint:staticcheck // ST1005: upstream contract
+	}
 	bodyBytes, err := readBody(resp.Body, maxBody)
 	if err != nil {
 		return "", "", fmt.Errorf("Failed to fetch %s: %w", rawURL, err) //nolint:staticcheck // ST1005: upstream contract
@@ -241,9 +246,10 @@ func fetchURL(ctx context.Context, rawURL, userAgent string, maxBody int64, opts
 }
 
 // checkRedirect follows up to maxRedirects hops, matching httpx's default
-// rather than net/http's 10.
+// rather than net/http's 10. via holds every request sent so far (the initial
+// one plus each followed hop), so hop N sees len(via) == N.
 func checkRedirect(_ *http.Request, via []*http.Request) error {
-	if len(via) >= maxRedirects {
+	if len(via) > maxRedirects {
 		return fmt.Errorf("stopped after %d redirects", maxRedirects)
 	}
 	return nil
@@ -251,8 +257,9 @@ func checkRedirect(_ *http.Request, via []*http.Request) error {
 
 // readBody reads r in full. With limit > 0 a body longer than limit bytes is
 // rejected (after reading at most limit+1 bytes) rather than buffered whole.
+// math.MaxInt64 is treated as unlimited so limit+1 cannot overflow.
 func readBody(r io.Reader, limit int64) ([]byte, error) {
-	if limit <= 0 {
+	if limit <= 0 || limit == math.MaxInt64 {
 		return io.ReadAll(r)
 	}
 	b, err := io.ReadAll(io.LimitReader(r, limit+1))
@@ -265,14 +272,18 @@ func readBody(r io.Reader, limit int64) ([]byte, error) {
 	return b, nil
 }
 
-// decodeBody converts the body to a valid UTF-8 string, mirroring httpx's
-// response.text: a charset declared in the Content-Type header (or a BOM, or an
-// HTML meta charset) is honoured; otherwise the body is taken as UTF-8.
+// decodeBody converts the body to a valid UTF-8 string. The charset is taken,
+// in order, from the Content-Type header, a BOM, or an HTML meta charset (the
+// browser rules charset.DetermineEncoding implements); with none of those a
+// valid-UTF-8 body is taken as UTF-8, and only a body that is not valid UTF-8
+// falls back to the library's windows-1252 guess.
 //
-// charset.DetermineEncoding's own last resort is windows-1252, which would turn
-// a UTF-8 body into mojibake whenever the first KiB happens to be pure ASCII.
-// So an uncertain guess is only followed when the body is not valid UTF-8 (a
-// real legacy-encoded page). Valid UTF-8 also skips the decoder copy entirely.
+// This is a superset of upstream's httpx response.text, which honours the
+// header charset and otherwise assumes UTF-8: the BOM / meta / legacy-guess
+// steps only kick in on pages upstream would have garbled. The UTF-8 check is
+// what keeps the library's last-resort guess from turning a UTF-8 body into
+// mojibake whenever its first KiB happens to be pure ASCII. Valid UTF-8 also
+// skips the decoder copy entirely.
 func decodeBody(body []byte, contentType string) (string, error) {
 	enc, name, certain := charset.DetermineEncoding(body, contentType)
 	if utf8.Valid(body) && (name == "utf-8" || !certain) {
@@ -352,7 +363,10 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 			return selectorMarkdown(doc, opts)
 		}
 		// ExcludeSelectors only: hand the pruned tree straight to Readability.
-		article, err = readability.FromDocument(doc.Nodes[0], base)
+		// ParseAndMutate rather than FromDocument, which would deep-clone a
+		// tree we never use again.
+		parser := readability.NewParser()
+		article, err = parser.ParseAndMutate(doc.Nodes[0], base)
 	} else {
 		article, err = readability.FromReader(strings.NewReader(page), base)
 	}
@@ -407,8 +421,10 @@ func selectorMarkdown(doc *goquery.Document, opts Options) string {
 }
 
 // absolutizeLinks resolves every relative href/src in doc against base, in
-// place. Absolute references (including data:, mailto: and javascript: URIs)
-// and unparsable values are left untouched. A nil base is a no-op.
+// place, following the same rules as Readability's own link handling:
+// absolute references (including data:, mailto: and javascript: URIs),
+// fragment-only references ("#top"), empty values and unparsable values are
+// left untouched. A nil base is a no-op.
 func absolutizeLinks(doc *goquery.Document, base *url.URL) {
 	if base == nil {
 		return
@@ -419,7 +435,11 @@ func absolutizeLinks(doc *goquery.Document, base *url.URL) {
 			if !ok {
 				continue
 			}
-			ref, err := url.Parse(strings.TrimSpace(raw))
+			raw = strings.TrimSpace(raw)
+			if raw == "" || strings.HasPrefix(raw, "#") {
+				continue
+			}
+			ref, err := url.Parse(raw)
 			if err != nil || ref.IsAbs() {
 				continue
 			}

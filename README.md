@@ -96,8 +96,9 @@ note, which is unusable as LLM context. With `Options.ExtractPDF: true`, a PDF
 response (detected by content-type or the `%PDF-` magic bytes) is run through a
 pure-Go text extractor and the extracted text is returned like any other
 content — no subprocess, no sidecar. `Raw` takes precedence: if set, the PDF is
-returned unextracted. Left `false` (the default), the upstream raw-bytes
-behaviour is preserved.
+returned unextracted. The [body cap](#body-cap-maxbodybytes-10-mib-by-default)
+applies to PDFs too; raise `MaxBodyBytes` for documents over 10 MiB. Left
+`false` (the default), the upstream raw-bytes behaviour is preserved.
 
 ### Extension: full-page & selector escape hatch (off by default)
 

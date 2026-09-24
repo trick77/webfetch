@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -577,7 +578,7 @@ func TestFetch_SelectorPathLinksResolveAgainstPage(t *testing.T) {
 func TestAbsolutizeLinks_HTTPSBase(t *testing.T) {
 	// The converter's own domain handling forced "http"; ours keeps the scheme.
 	base, _ := url.Parse("https://example.com/a/b/page.html?q=1")
-	doc, err := goqueryDoc(`<a href="/x">x</a><a href="y">y</a><img src="//h/i.png"><a href="#frag">f</a><a href="javascript:void(0)">j</a>`)
+	doc, err := goqueryDoc(`<a href="/x">x</a><a href="y">y</a><img src="//h/i.png"><a href="#frag">f</a><a href="">e</a><a href="javascript:void(0)">j</a>`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -595,7 +596,8 @@ func TestAbsolutizeLinks_HTTPSBase(t *testing.T) {
 		"https://example.com/x",
 		"https://example.com/a/b/y",
 		"https://h/i.png",
-		"https://example.com/a/b/page.html?q=1#frag",
+		"#frag", // in-page anchors stay relative, as on the Readability path
+		"",
 		"javascript:void(0)",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
@@ -734,6 +736,10 @@ func TestReadBody_Limit(t *testing.T) {
 	if _, err := readBody(bytes.NewReader(body), 99); err == nil || !strings.Contains(err.Error(), "exceeds 99 bytes") {
 		t.Fatalf("one over cap must fail, got: %v", err)
 	}
+	// limit+1 must not overflow into a negative LimitReader size.
+	if b, err := readBody(bytes.NewReader(body), math.MaxInt64); err != nil || len(b) != 100 {
+		t.Fatalf("MaxInt64 must mean unlimited: got %d bytes, err %v", len(b), err)
+	}
 }
 
 func TestFetch_MaxBodyBytes(t *testing.T) {
@@ -750,8 +756,22 @@ func TestFetch_MaxBodyBytes(t *testing.T) {
 		}
 	}
 
+	// A declared Content-Length over the cap is rejected before any body is
+	// read at all.
+	declared := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 1000))
+	}))
+	defer declared.Close()
+	_, err = Fetch(context.Background(), declared.URL+"/declared", Options{MaxBodyBytes: 500})
+	if err == nil || !strings.Contains(err.Error(), "exceeds 500 bytes") {
+		t.Fatalf("expected Content-Length pre-check to reject, got: %v", err)
+	}
+
 	// The default cap is real: one byte over DefaultMaxBodyBytes fails, and the
-	// handler is stopped early rather than streamed to completion.
+	// handler is stopped early rather than streamed to completion. Chunked (no
+	// Content-Length), so this exercises the read-side cap, not the pre-check.
 	huge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		chunk := bytes.Repeat([]byte("x"), 1<<20)
@@ -787,14 +807,17 @@ func TestFetch_RedirectLimit(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// 15 hops exceeds net/http's default of 10 but is within httpx's 20.
-	out, err := Fetch(context.Background(), srv.URL+"/hop/0/15", Options{})
-	if err != nil || !strings.Contains(out, "landed") {
-		t.Fatalf("15 redirects should be followed, got err=%v out=%q", err, out)
+	// 15 hops exceeds net/http's default of 10; exactly 20 is httpx's limit
+	// and must still be followed; 21 must not.
+	for _, hops := range []int{15, maxRedirects} {
+		out, err := Fetch(context.Background(), fmt.Sprintf("%s/hop/0/%d", srv.URL, hops), Options{})
+		if err != nil || !strings.Contains(out, "landed") {
+			t.Fatalf("%d redirects should be followed, got err=%v out=%q", hops, err, out)
+		}
 	}
-	_, err = Fetch(context.Background(), srv.URL+"/hop/0/25", Options{})
+	_, err := Fetch(context.Background(), fmt.Sprintf("%s/hop/0/%d", srv.URL, maxRedirects+1), Options{})
 	if err == nil || !strings.Contains(err.Error(), "Failed to fetch") || !strings.Contains(err.Error(), "redirects") {
-		t.Fatalf("25 redirects should fail, got: %v", err)
+		t.Fatalf("%d redirects should fail, got: %v", maxRedirects+1, err)
 	}
 }
 
