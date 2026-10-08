@@ -29,6 +29,7 @@ package webfetch
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -107,6 +108,8 @@ type Options struct {
 	// subprocess). Raw takes precedence: if Raw is set, the PDF is returned
 	// unextracted. Default false, preserving the upstream raw-bytes behaviour.
 	// MaxBodyBytes applies to PDFs too; raise it for documents over 10 MiB.
+	// A PDF that parses but yields no text (e.g. a scan without OCR) is
+	// reported as an error, like an unparsable one.
 	ExtractPDF bool
 	// FullPage converts the entire page to Markdown, skipping the Readability
 	// main-content extraction. Use it when Readability over-strips (docs pages,
@@ -533,7 +536,12 @@ func extractPDFText(body []byte) (text string, err error) {
 	if _, err := io.Copy(&sb, plain); err != nil {
 		return "", err
 	}
-	return strings.ToValidUTF8(strings.TrimSpace(sb.String()), "\uFFFD"), nil
+	text = strings.TrimSpace(sb.String())
+	if text == "" {
+		// Typically a scan without a text layer; a fallback reader may do better.
+		return "", errors.New("no extractable text")
+	}
+	return strings.ToValidUTF8(text, "\uFFFD"), nil
 }
 
 var (

@@ -469,6 +469,41 @@ func TestFetch_CorruptPDFReportsExtractionFailure(t *testing.T) {
 	}
 }
 
+func TestFetch_TextlessPDFReportsExtractionFailure(t *testing.T) {
+	allowLoopback(t)
+	// A well-formed one-page PDF whose page has no text (like a scan without
+	// OCR): extraction yields nothing, which must surface as an error so a
+	// caller's fallback runs.
+	objs := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>",
+		"<< /Length 0 >>\nstream\n\nendstream",
+	}
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.4\n")
+	offsets := make([]int, len(objs))
+	for i, o := range objs {
+		offsets[i] = b.Len()
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", i+1, o)
+	}
+	xref := b.Len()
+	fmt.Fprintf(&b, "xref\n0 %d\n0000000000 65535 f \n", len(objs)+1)
+	for _, off := range offsets {
+		fmt.Fprintf(&b, "%010d 00000 n \n", off)
+	}
+	fmt.Fprintf(&b, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objs)+1, xref)
+	srv := serve(t, "application/pdf", b.Bytes())
+
+	_, err := Fetch(context.Background(), srv.URL, Options{ExtractPDF: true})
+	if err == nil {
+		t.Fatal("expected an error for a PDF without text")
+	}
+	if !strings.Contains(err.Error(), "Failed to extract PDF") {
+		t.Fatalf("unexpected error text: %v", err)
+	}
+}
+
 // serve returns an httptest server that answers every request with the given
 // content type and body.
 func serve(t *testing.T, contentType string, body []byte) *httptest.Server {
