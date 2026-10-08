@@ -110,6 +110,12 @@ type Options struct {
 	// MaxBodyBytes applies to PDFs too; raise it for documents over 10 MiB.
 	// A PDF that parses but yields no text (e.g. a scan without OCR) is
 	// reported as an error, like an unparsable one.
+	//
+	// Enable only for trusted sources. The parser has no resource limits: a
+	// crafted PDF well under MaxBodyBytes can decompress or allocate gigabytes
+	// and exhaust CPU or memory (a fatal out-of-memory that recover cannot
+	// catch). For untrusted URLs, leave this off and send PDFs to an isolated
+	// fallback reader.
 	ExtractPDF bool
 	// FullPage converts the entire page to Markdown, skipping the Readability
 	// main-content extraction. Use it when Readability over-strips (docs pages,
