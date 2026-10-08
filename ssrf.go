@@ -57,10 +57,12 @@ var specialUseRanges = mustParseCIDRs(
 	"64:ff9b::/96",   // NAT64
 	"64:ff9b:1::/48", // local-use NAT64
 	"100::/64",       // discard-only
+	"2001:2::/48",    // benchmarking
 	"2001:db8::/32",  // documentation
 	"2002::/16",      // 6to4
 	"3fff::/20",      // documentation
 	"5f00::/16",      // segment routing (SRv6)
+	"fec0::/10",      // site-local (deprecated, RFC 3879)
 )
 
 // isPublicIP reports whether ip is a globally-routable public unicast address
