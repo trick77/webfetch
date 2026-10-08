@@ -19,7 +19,6 @@ import (
 	"testing"
 
 	"github.com/PuerkitoBio/goquery"
-	"github.com/ledongthuc/pdf"
 )
 
 // allowLoopback relaxes the SSRF guard so tests can reach the loopback
@@ -526,63 +525,53 @@ func TestFetch_PDFDecompressionBombRejected(t *testing.T) {
 	}
 }
 
-func TestCheckPDFBudget(t *testing.T) {
+func TestCheckPDFStreams(t *testing.T) {
 	big := bytes.Repeat([]byte("x"), 1000)
-	page := func(contents string) string {
-		return "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> >> /Contents " + contents + " >>"
-	}
-	build := func(contents string, toUnicode []byte) *pdf.Reader {
-		data := pdfFromObjects(
-			"<< /Type /Catalog /Pages 2 0 R >>",
-			"<< /Type /Pages /Kids [3 0 R 8 0 R] /Count 2 >>",
-			page(contents),
-			pdfStream(big),
-			pdfStream(big),
-			"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 7 0 R >>",
-			pdfStream(toUnicode),
-			"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> >> >>",
-		)
-		r, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
-		if err != nil {
-			t.Fatalf("fixture: %v", err)
-		}
-		return r
-	}
-
-	// Two content streams (array form) count toward the budget together; the
-	// font shared by both pages counts once; the second page has no Contents.
-	r := build("[4 0 R 5 0 R]", big)
-	if err := checkPDFBudget(r, 3000); err != nil {
-		t.Fatalf("3000 bytes should fit, got: %v", err)
-	}
-	if err := checkPDFBudget(r, 1500); err == nil || !strings.Contains(err.Error(), "exceeds 1500 bytes") {
-		t.Fatalf("second content stream should exceed 1500, got: %v", err)
-	}
-	// A ToUnicode map over budget is caught.
-	if err := checkPDFBudget(build("4 0 R", bytes.Repeat(big, 5)), 3000); err == nil {
-		t.Fatal("oversized ToUnicode map should exceed the budget")
-	}
-	// A corrupt compressed stream surfaces as a read error, not a pass.
+	// Every zlib stream counts, whatever object it belongs to (here two
+	// unreferenced ones); a raw stream, a corrupt zlib stream and a stream
+	// with CRLF after the keyword are handled; "endstream" is not a start.
 	data := pdfFromObjects(
 		"<< /Type /Catalog /Pages 2 0 R >>",
-		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>",
+		"<< /Type /Pages /Kids [] /Count 0 >>",
+		pdfStream(big),
+		"<< /Length 5 >>\nstream\nhello\nendstream",
 		"<< /Length 6 /Filter /FlateDecode >>\nstream\nx\x9c\xcb\xcb\xcf\nendstream",
+		strings.Replace(pdfStream(big), "stream\n", "stream\r\n", 1),
 	)
-	cr, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		t.Fatalf("fixture: %v", err)
+	// Two 1000-byte streams plus the few bytes the corrupt one yields before
+	// failing.
+	if err := checkPDFStreams(data, 2100); err != nil {
+		t.Fatalf("2100 bytes should fit, got: %v", err)
 	}
-	if err := checkPDFBudget(cr, 3000); err == nil {
-		t.Fatal("truncated flate stream should fail the budget check")
+	if err := checkPDFStreams(data, 1500); err == nil || !strings.Contains(err.Error(), "exceeds 1500 bytes") {
+		t.Fatalf("second zlib stream should exceed 1500, got: %v", err)
+	}
+	// A stream missing its endstream is still measured to the end of the file.
+	if err := checkPDFStreams([]byte(strings.TrimSuffix(pdfStream(big), "\nendstream")), 500); err == nil {
+		t.Fatal("unterminated stream should still count")
+	}
+}
+
+func TestFetch_PDFPageCountCapped(t *testing.T) {
+	allowLoopback(t)
+	// A tiny file claiming far more pages than maxPDFPages is refused instead
+	// of walking the page tree for each claimed page.
+	srv := serve(t, "application/pdf", pdfFromObjects(
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		fmt.Sprintf("<< /Type /Pages /Kids [3 0 R] /Count %d >>", maxPDFPages+1),
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+	))
+	_, err := Fetch(context.Background(), srv.URL, Options{ExtractPDF: true})
+	if err == nil || !strings.Contains(err.Error(), "page limit") {
+		t.Fatalf("expected the page cap to reject, got: %v", err)
 	}
 }
 
 func TestPDFBudget(t *testing.T) {
 	for _, c := range []struct{ maxBody, want int64 }{
 		{DefaultMaxBodyBytes, DefaultMaxBodyBytes * pdfBudgetRatio},
-		{-1, 0},                // unlimited body, unlimited budget
-		{math.MaxInt64 / 2, 0}, // would overflow
+		{-1, 0},                            // unlimited body, unlimited budget
+		{math.MaxInt64 / 2, math.MaxInt64}, // saturates instead of overflowing
 	} {
 		if got := pdfBudget(c.maxBody); got != c.want {
 			t.Errorf("pdfBudget(%d) = %d, want %d", c.maxBody, got, c.want)
