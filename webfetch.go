@@ -108,8 +108,11 @@ type Options struct {
 	// subprocess). Raw takes precedence: if Raw is set, the PDF is returned
 	// unextracted. Default false, preserving the upstream raw-bytes behaviour.
 	// MaxBodyBytes applies to PDFs too; raise it for documents over 10 MiB.
-	// A PDF that parses but yields no text (e.g. a scan without OCR) is
-	// reported as an error, like an unparsable one.
+	// The page content a PDF decompresses to is capped at 10x MaxBodyBytes
+	// (unlimited when MaxBodyBytes is), so a small compressed PDF cannot
+	// unpack to gigabytes. A PDF over that budget, one that parses but yields
+	// no text (e.g. a scan without OCR), and an unparsable one are all
+	// reported as errors.
 	ExtractPDF bool
 	// FullPage converts the entire page to Markdown, skipping the Readability
 	// main-content extraction. Use it when Readability over-strips (docs pages,
@@ -220,7 +223,7 @@ func fetchURL(ctx context.Context, rawURL string, opts Options) (content, prefix
 	// PDF handling runs on the raw bytes, before charset decoding (which would
 	// corrupt binary content). Raw takes precedence, matching the option's doc.
 	if opts.ExtractPDF && !opts.Raw && isPDF(contentType, bodyBytes) {
-		text, pdfErr := extractPDFText(bodyBytes)
+		text, pdfErr := extractPDFText(bodyBytes, pdfBudget(opts.MaxBodyBytes))
 		if pdfErr != nil {
 			return "", "", fmt.Errorf("Failed to extract PDF %s: %w", rawURL, pdfErr) //nolint:staticcheck // ST1005: matches the upstream-style messages
 		}
@@ -550,7 +553,11 @@ func isPDF(contentType string, body []byte) bool {
 // parser can panic on malformed input, so a recover converts that into an error
 // (callers with a headless-browser fallback treat a non-nil error as "try the
 // fallback").
-func extractPDFText(body []byte) (text string, err error) {
+//
+// budget (0 = unlimited) caps the total decompressed size of the streams text
+// extraction interprets. Flate reaches ~1000:1, so without it a PDF under
+// MaxBodyBytes could unpack to gigabytes, all collected in memory.
+func extractPDFText(body []byte, budget int64) (text string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("pdf parse panicked: %v", r)
@@ -559,6 +566,11 @@ func extractPDFText(body []byte) (text string, err error) {
 	reader, err := pdf.NewReader(bytes.NewReader(body), int64(len(body)))
 	if err != nil {
 		return "", err
+	}
+	if budget > 0 {
+		if err := checkPDFBudget(reader, budget); err != nil {
+			return "", err
+		}
 	}
 	plain, err := reader.GetPlainText()
 	if err != nil {
@@ -574,6 +586,63 @@ func extractPDFText(body []byte) (text string, err error) {
 		return "", errors.New("no extractable text")
 	}
 	return strings.ToValidUTF8(text, "\uFFFD"), nil
+}
+
+// pdfBudgetRatio sets the PDF decompression budget relative to MaxBodyBytes.
+const pdfBudgetRatio = 10
+
+// pdfBudget returns the decompression budget for a resolved MaxBodyBytes cap:
+// pdfBudgetRatio times the cap, or 0 (unlimited) when the cap is unlimited.
+func pdfBudget(maxBody int64) int64 {
+	if maxBody <= 0 || maxBody > math.MaxInt64/pdfBudgetRatio {
+		return 0
+	}
+	return maxBody * pdfBudgetRatio
+}
+
+// checkPDFBudget decompresses, and discards, every stream GetPlainText will
+// interpret: each page's content stream(s), once per page as GetPlainText
+// does, and each distinct font's ToUnicode map. It fails as soon as the total
+// passes budget, so at most budget+1 bytes are ever unpacked.
+func checkPDFBudget(r *pdf.Reader, budget int64) error {
+	remaining := budget
+	consume := func(v pdf.Value) error {
+		if v.Kind() != pdf.Stream {
+			return nil
+		}
+		n, err := io.Copy(io.Discard, io.LimitReader(v.Reader(), remaining+1))
+		if err != nil {
+			return err
+		}
+		if remaining -= n; remaining < 0 {
+			return fmt.Errorf("decompressed content exceeds %d bytes", budget)
+		}
+		return nil
+	}
+	fonts := make(map[string]bool)
+	for i := 1; i <= r.NumPage(); i++ {
+		p := r.Page(i)
+		contents := p.V.Key("Contents")
+		if contents.Kind() == pdf.Array {
+			for j := 0; j < contents.Len(); j++ {
+				if err := consume(contents.Index(j)); err != nil {
+					return err
+				}
+			}
+		} else if err := consume(contents); err != nil {
+			return err
+		}
+		for _, name := range p.Fonts() {
+			if fonts[name] {
+				continue
+			}
+			fonts[name] = true
+			if err := consume(p.Font(name).V.Key("ToUnicode")); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 var (

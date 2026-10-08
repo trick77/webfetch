@@ -97,9 +97,12 @@ response (detected by content-type or the `%PDF-` magic bytes) is run through a
 pure-Go text extractor and the extracted text is returned like any other
 content — no subprocess, no sidecar. `Raw` takes precedence: if set, the PDF is
 returned unextracted. The [body cap](#body-cap-maxbodybytes-10-mib-by-default)
-applies to PDFs too; raise `MaxBodyBytes` for documents over 10 MiB. A PDF
-that cannot be parsed, or parses but yields no text (a scan without OCR),
-returns a `Failed to extract PDF` error, so a caller's fallback can take over.
+applies to PDFs too; raise `MaxBodyBytes` for documents over 10 MiB. What a
+PDF's page content decompresses to is capped at 10× `MaxBodyBytes` (unlimited
+when the body cap is), so a small compressed PDF cannot unpack to gigabytes. A
+PDF over that budget, one that cannot be parsed, or one that parses but yields
+no text (a scan without OCR) returns a `Failed to extract PDF` error, so a
+caller's fallback can take over.
 Left `false` (the default), the upstream raw-bytes behaviour is preserved.
 
 ### Extension: full-page & selector escape hatch (off by default)

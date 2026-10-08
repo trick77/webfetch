@@ -2,6 +2,7 @@ package webfetch
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/ledongthuc/pdf"
 )
 
 // allowLoopback relaxes the SSRF guard so tests can reach the loopback
@@ -487,12 +489,138 @@ func TestFetch_TextlessPDFReportsExtractionFailure(t *testing.T) {
 	// A well-formed one-page PDF whose page has no text (like a scan without
 	// OCR): extraction yields nothing, which must surface as an error so a
 	// caller's fallback runs.
-	objs := []string{
+	srv := serve(t, "application/pdf", onePagePDF(nil, false))
+
+	_, err := Fetch(context.Background(), srv.URL, Options{ExtractPDF: true})
+	if err == nil {
+		t.Fatal("expected an error for a PDF without text")
+	}
+	// The specific reason proves the PDF parsed and the empty-text check fired.
+	if !strings.Contains(err.Error(), "Failed to extract PDF") || !strings.Contains(err.Error(), "no extractable text") {
+		t.Fatalf("unexpected error text: %v", err)
+	}
+}
+
+func TestFetch_PDFDecompressionBombRejected(t *testing.T) {
+	allowLoopback(t)
+	// 4 MiB of text-drawing operators deflate to a few KiB. With a 64 KiB body
+	// cap the decompression budget is 640 KiB, so extraction must refuse the
+	// page instead of unpacking and collecting all of it.
+	content := bytes.Repeat([]byte("BT (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) Tj ET\n"), 4<<20/41)
+	pdfBytes := onePagePDF(content, true)
+	if len(pdfBytes) > 64<<10 {
+		t.Fatalf("fixture should fit under the body cap, is %d bytes", len(pdfBytes))
+	}
+	srv := serve(t, "application/pdf", pdfBytes)
+
+	_, err := Fetch(context.Background(), srv.URL, Options{ExtractPDF: true, MaxBodyBytes: 64 << 10})
+	if err == nil || !strings.Contains(err.Error(), "Failed to extract PDF") || !strings.Contains(err.Error(), "decompressed content exceeds") {
+		t.Fatalf("expected the decompression budget to reject the PDF, got: %v", err)
+	}
+
+	// The same page under the budget extracts normally.
+	small := onePagePDF(bytes.Repeat([]byte("BT (hello) Tj ET\n"), 10), true)
+	out, err := Fetch(context.Background(), serve(t, "application/pdf", small).URL, Options{ExtractPDF: true, MaxBodyBytes: 64 << 10})
+	if err != nil || !strings.Contains(out, "hello") {
+		t.Fatalf("expected small compressed PDF to extract, got %v:\n%s", err, out)
+	}
+}
+
+func TestCheckPDFBudget(t *testing.T) {
+	big := bytes.Repeat([]byte("x"), 1000)
+	page := func(contents string) string {
+		return "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> >> /Contents " + contents + " >>"
+	}
+	build := func(contents string, toUnicode []byte) *pdf.Reader {
+		data := pdfFromObjects(
+			"<< /Type /Catalog /Pages 2 0 R >>",
+			"<< /Type /Pages /Kids [3 0 R 8 0 R] /Count 2 >>",
+			page(contents),
+			pdfStream(big),
+			pdfStream(big),
+			"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 7 0 R >>",
+			pdfStream(toUnicode),
+			"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> >> >>",
+		)
+		r, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
+		if err != nil {
+			t.Fatalf("fixture: %v", err)
+		}
+		return r
+	}
+
+	// Two content streams (array form) count toward the budget together; the
+	// font shared by both pages counts once; the second page has no Contents.
+	r := build("[4 0 R 5 0 R]", big)
+	if err := checkPDFBudget(r, 3000); err != nil {
+		t.Fatalf("3000 bytes should fit, got: %v", err)
+	}
+	if err := checkPDFBudget(r, 1500); err == nil || !strings.Contains(err.Error(), "exceeds 1500 bytes") {
+		t.Fatalf("second content stream should exceed 1500, got: %v", err)
+	}
+	// A ToUnicode map over budget is caught.
+	if err := checkPDFBudget(build("4 0 R", bytes.Repeat(big, 5)), 3000); err == nil {
+		t.Fatal("oversized ToUnicode map should exceed the budget")
+	}
+	// A corrupt compressed stream surfaces as a read error, not a pass.
+	data := pdfFromObjects(
 		"<< /Type /Catalog /Pages 2 0 R >>",
 		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
 		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>",
-		"<< /Length 0 >>\nstream\n\nendstream",
+		"<< /Length 6 /Filter /FlateDecode >>\nstream\nx\x9c\xcb\xcb\xcf\nendstream",
+	)
+	cr, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("fixture: %v", err)
 	}
+	if err := checkPDFBudget(cr, 3000); err == nil {
+		t.Fatal("truncated flate stream should fail the budget check")
+	}
+}
+
+func TestPDFBudget(t *testing.T) {
+	for _, c := range []struct{ maxBody, want int64 }{
+		{DefaultMaxBodyBytes, DefaultMaxBodyBytes * pdfBudgetRatio},
+		{-1, 0},                // unlimited body, unlimited budget
+		{math.MaxInt64 / 2, 0}, // would overflow
+	} {
+		if got := pdfBudget(c.maxBody); got != c.want {
+			t.Errorf("pdfBudget(%d) = %d, want %d", c.maxBody, got, c.want)
+		}
+	}
+}
+
+// onePagePDF builds a minimal one-page PDF whose page content stream is
+// content, FlateDecode-compressed when deflate is set.
+func onePagePDF(content []byte, deflate bool) []byte {
+	stream, filter := content, ""
+	if deflate {
+		var z bytes.Buffer
+		zw := zlib.NewWriter(&z)
+		_, _ = zw.Write(content)
+		_ = zw.Close()
+		stream, filter = z.Bytes(), " /Filter /FlateDecode"
+	}
+	return pdfFromObjects(
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Length %d%s >>\nstream\n%s\nendstream", len(stream), filter, stream),
+	)
+}
+
+// pdfStream renders a FlateDecode stream object holding data, compressed.
+func pdfStream(data []byte) string {
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	_, _ = zw.Write(data)
+	_ = zw.Close()
+	return fmt.Sprintf("<< /Length %d /Filter /FlateDecode >>\nstream\n%s\nendstream", z.Len(), z.Bytes())
+}
+
+// pdfFromObjects serializes objs as objects 1..n (object 1 the catalog) with a
+// valid xref table and trailer.
+func pdfFromObjects(objs ...string) []byte {
 	var b bytes.Buffer
 	b.WriteString("%PDF-1.4\n")
 	offsets := make([]int, len(objs))
@@ -506,16 +634,7 @@ func TestFetch_TextlessPDFReportsExtractionFailure(t *testing.T) {
 		fmt.Fprintf(&b, "%010d 00000 n \n", off)
 	}
 	fmt.Fprintf(&b, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objs)+1, xref)
-	srv := serve(t, "application/pdf", b.Bytes())
-
-	_, err := Fetch(context.Background(), srv.URL, Options{ExtractPDF: true})
-	if err == nil {
-		t.Fatal("expected an error for a PDF without text")
-	}
-	// The specific reason proves the PDF parsed and the empty-text check fired.
-	if !strings.Contains(err.Error(), "Failed to extract PDF") || !strings.Contains(err.Error(), "no extractable text") {
-		t.Fatalf("unexpected error text: %v", err)
-	}
+	return b.Bytes()
 }
 
 // serve returns an httptest server that answers every request with the given
