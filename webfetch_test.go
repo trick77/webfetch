@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -110,10 +109,7 @@ func TestFetch_IncludeMetadata(t *testing.T) {
 
 func TestFetch_PDFHandler(t *testing.T) {
 	allowLoopback(t)
-	pdfBytes, err := os.ReadFile("testdata/sample.pdf")
-	if err != nil {
-		t.Fatalf("read fixture: %v", err)
-	}
+	pdfBytes := []byte("%PDF-1.4\nopaque body")
 	srv := serve(t, "application/pdf", pdfBytes)
 	var got []byte
 	handler := func(_ context.Context, body []byte) (string, error) {
@@ -164,6 +160,33 @@ func TestFetch_PDFHandlerSniffsMagic(t *testing.T) {
 	}
 	if !strings.HasSuffix(out, "\nSNIFFED") {
 		t.Fatalf("a %%PDF- body must reach the handler, got:\n%s", out)
+	}
+}
+
+func TestFetch_PDFHandlerIgnoresLabelWithoutMagic(t *testing.T) {
+	allowLoopback(t)
+	// The Content-Type alone does not make a PDF: no magic, no handler.
+	srv := serve(t, "Application/PDF", []byte("not a pdf"))
+	called := false
+	out, err := Fetch(context.Background(), srv.URL, Options{
+		PDFHandler: func(context.Context, []byte) (string, error) { called = true; return "x", nil },
+	})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if called || !strings.Contains(out, "cannot be simplified") {
+		t.Fatalf("a body without %%PDF- must not reach the handler, got:\n%s", out)
+	}
+}
+
+func TestFetch_PDFHandlerPanic(t *testing.T) {
+	allowLoopback(t)
+	srv := serve(t, "application/pdf", []byte("%PDF-1.4\nbody"))
+	_, err := Fetch(context.Background(), srv.URL, Options{
+		PDFHandler: func(context.Context, []byte) (string, error) { panic("bad xref") },
+	})
+	if err == nil || !strings.Contains(err.Error(), "Failed to extract PDF") || !strings.Contains(err.Error(), "bad xref") {
+		t.Fatalf("a handler panic must become an error, got: %v", err)
 	}
 }
 
@@ -520,6 +543,16 @@ func TestFetch_PDFCap(t *testing.T) {
 	// ...but not without one: the body cap still applies.
 	if _, err := Fetch(context.Background(), srv.URL, Options{}); err == nil {
 		t.Fatal("without a handler the body cap must apply")
+	}
+	// The magic bytes, not the label, pick the cap: a sniffed PDF gets it...
+	sniffed := serve(t, "application/octet-stream", big)
+	if _, err := Fetch(context.Background(), sniffed.URL, Options{PDFHandler: handler}); err != nil {
+		t.Fatalf("a sniffed PDF must get the PDF cap, got: %v", err)
+	}
+	// ...and a body merely labelled application/pdf does not.
+	junk := make([]byte, 200)
+	if _, err := Fetch(context.Background(), serve(t, "application/pdf", junk).URL, Options{PDFHandler: handler, MaxBodyBytes: 100}); err == nil {
+		t.Fatal("a mislabelled body must keep MaxBodyBytes")
 	}
 
 	// Over the PDF cap fails, whether announced by Content-Length or streamed.

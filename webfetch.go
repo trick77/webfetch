@@ -27,6 +27,7 @@
 package webfetch
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -106,17 +107,19 @@ type Options struct {
 	// calls so a page-2 StartIndex stays aligned.
 	IncludeMetadata bool
 	// PDFHandler, when set, receives the body of a PDF response (detected by
-	// content-type or the "%PDF-" magic bytes) and returns its text, which is
-	// then returned like any other content instead of the raw bytes behind the
-	// "cannot be simplified" note. webfetch does not parse PDFs itself: the bytes
-	// are untrusted, so run the parser somewhere a malformed or malicious PDF
-	// cannot take the caller down (e.g. a Tika sidecar). A handler error, or
-	// text that is empty after trimming (e.g. a scan without OCR), fails the
-	// fetch with a "Failed to extract PDF" error. Raw takes precedence. Nil (the
-	// default) keeps the upstream raw-bytes behaviour.
+	// the "%PDF-" magic bytes, whatever the Content-Type) and returns its text,
+	// which is then returned like any other content instead of the raw bytes
+	// behind the "cannot be simplified" note. webfetch does not parse PDFs
+	// itself: the bytes are untrusted, so run the parser somewhere a malformed
+	// or malicious PDF cannot take the caller down (e.g. a Tika sidecar). The
+	// handler must bound its own run time; webfetch's fetch timeout covers only
+	// the download. A handler error or panic, or text that is empty after
+	// trimming (e.g. a scan without OCR), fails the fetch with a "Failed to
+	// extract PDF" error. Raw takes precedence. Nil (the default) keeps the
+	// upstream raw-bytes behaviour.
 	PDFHandler func(ctx context.Context, body []byte) (string, error)
-	// MaxPDFBytes replaces MaxBodyBytes for responses served with a PDF
-	// content-type while PDFHandler is set. Zero applies DefaultMaxPDFBytes
+	// MaxPDFBytes caps PDF bodies in place of MaxBodyBytes while PDFHandler is
+	// set; the two caps are independent. Zero applies DefaultMaxPDFBytes
 	// (50 MiB); a negative value disables the cap.
 	MaxPDFBytes int64
 	// FullPage converts the entire page to Markdown, skipping the Readability
@@ -219,24 +222,34 @@ func fetchURL(ctx context.Context, rawURL string, opts Options) (content, prefix
 		return "", "", fmt.Errorf("Failed to fetch %s - status code %d", rawURL, resp.StatusCode) //nolint:staticcheck // ST1005: upstream contract
 	}
 
-	contentType := resp.Header.Get("content-type")
-	handlePDF := opts.PDFHandler != nil && !opts.Raw
+	// A PDF is recognised by its magic bytes alone, never by the Content-Type
+	// header, so a mislabelled body cannot claim the larger PDF cap. Peeking
+	// lets the cap be chosen before the body is read.
+	var body io.Reader = resp.Body
+	isPDF := false
+	if opts.PDFHandler != nil && !opts.Raw {
+		br := bufio.NewReader(resp.Body)
+		magic, _ := br.Peek(len(pdfMagic))
+		isPDF = bytes.Equal(magic, pdfMagic)
+		body = br
+	}
 	limit := opts.MaxBodyBytes
-	if handlePDF && isPDFContentType(contentType) {
+	if isPDF {
 		limit = opts.MaxPDFBytes
 	}
 	if limit > 0 && resp.ContentLength > limit {
 		return "", "", fetchErr(rawURL, errBodyTooLarge(limit))
 	}
-	bodyBytes, err := readBody(resp.Body, limit)
+	bodyBytes, err := readBody(body, limit)
 	if err != nil {
 		return "", "", fetchErr(rawURL, err)
 	}
+	contentType := resp.Header.Get("content-type")
 
 	// PDF handling runs on the raw bytes, before charset decoding (which would
 	// corrupt binary content). Raw takes precedence, matching the option's doc.
-	if handlePDF && isPDF(contentType, bodyBytes) {
-		text, pdfErr := opts.PDFHandler(ctx, bodyBytes)
+	if isPDF {
+		text, pdfErr := callPDFHandler(ctx, opts.PDFHandler, bodyBytes)
 		if pdfErr == nil && strings.TrimSpace(text) == "" {
 			pdfErr = errors.New("no extractable text")
 		}
@@ -555,17 +568,18 @@ func yamlQuote(s string) string {
 	return `"` + s + `"`
 }
 
-// isPDF reports whether the response is a PDF, by content-type or the "%PDF-"
-// magic bytes (which also catches PDFs served as application/octet-stream).
-func isPDF(contentType string, body []byte) bool {
-	return isPDFContentType(contentType) || bytes.HasPrefix(body, []byte("%PDF-"))
-}
+// pdfMagic starts every PDF, whatever Content-Type it is served with.
+var pdfMagic = []byte("%PDF-")
 
-// isPDFContentType reports whether the content-type names a PDF; it is known
-// before the body is read, so it selects the MaxPDFBytes cap.
-func isPDFContentType(contentType string) bool {
-	return strings.Contains(contentType, "application/pdf") ||
-		strings.Contains(contentType, "application/x-pdf")
+// callPDFHandler runs the caller's handler, turning a panic into an error so a
+// malformed PDF fails the fetch instead of the caller's process.
+func callPDFHandler(ctx context.Context, h func(context.Context, []byte) (string, error), body []byte) (text string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("pdf handler panicked: %v", r)
+		}
+	}()
+	return h(ctx, body)
 }
 
 var (

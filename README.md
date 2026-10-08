@@ -93,26 +93,30 @@ is byte-identical to upstream — see [Fidelity](#fidelity).
 
 Upstream returns PDF responses as raw bytes behind a "cannot be simplified"
 note, which is unusable as LLM context. webfetch does not parse PDFs itself;
-set `Options.PDFHandler` and a PDF response (detected by content-type or the
-`%PDF-` magic bytes) is handed to it as bytes, downloaded through the same SSRF
-guard. The text it returns is the content, paged by `StartIndex` / `MaxLength`
-like any other:
+set `Options.PDFHandler` and a PDF response (detected by the `%PDF-` magic
+bytes, whatever its Content-Type) is handed to it as bytes, downloaded through
+the same SSRF guard. The text it returns is the content, paged by `StartIndex` /
+`MaxLength` like any other:
 
 ```go
+// Illustrative: extractor stands for your own client, e.g. for a Tika sidecar.
 out, err := webfetch.Fetch(ctx, url, webfetch.Options{
     PDFHandler: func(ctx context.Context, body []byte) (string, error) {
-        return tika.Extract(ctx, "fetched.pdf", "application/pdf", bytes.NewReader(body))
+        ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+        defer cancel()
+        return extractor.Extract(ctx, bytes.NewReader(body))
     },
 })
 ```
 
 The bytes are untrusted: run the parser where a malicious PDF cannot take your
-process down (e.g. a Tika sidecar). With a handler set, PDF responses use their
-own cap, `MaxPDFBytes` (default `webfetch.DefaultMaxPDFBytes`, 50 MiB; negative
-disables it) instead of `MaxBodyBytes`. A handler error, or empty text (a scan
-without OCR), returns a `Failed to extract PDF` error, so a caller's fallback
-can take over. `Raw` takes precedence. Nil (the default) keeps the upstream
-raw-bytes behaviour.
+process down (e.g. a Tika sidecar). The handler must bound its own run time;
+webfetch's 30 s timeout covers only the download. With a handler set, PDF
+bodies use their own cap, `MaxPDFBytes` (default `webfetch.DefaultMaxPDFBytes`,
+50 MiB; negative disables it), independent of `MaxBodyBytes`. A handler error or
+panic, or empty text (a scan without OCR), returns a `Failed to extract PDF`
+error, so a caller's fallback can take over. `Raw` takes precedence. Nil (the
+default) keeps the upstream raw-bytes behaviour.
 
 ### Extension: full-page & selector escape hatch (off by default)
 
