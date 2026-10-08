@@ -7,10 +7,13 @@ import (
 	"syscall"
 )
 
-// guardedControl is a net.Dialer Control hook that rejects connections to
+// GuardedControl is a net.Dialer Control hook that rejects connections to
 // non-public IP addresses. It runs after DNS resolution with the concrete IP
 // the socket is about to connect to, so it also blocks DNS-rebinding to a
 // private target.
+//
+// It is exported so a caller that makes its own requests gets the same guard:
+// set it as the Control of the net.Dialer its transport dials through.
 //
 // This replaces the SSRF protection that the deployment previously got for
 // free by isolating the fetch sidecar on its own Docker network: with fetch
@@ -18,7 +21,7 @@ import (
 // injected) URL could otherwise reach loopback, RFC1918 hosts, or the cloud
 // metadata endpoint (169.254.169.254). Blocking is done here, in the dialer,
 // because that is the only place the real destination IP is known.
-func guardedControl(network, address string, _ syscall.RawConn) error {
+func GuardedControl(network, address string, _ syscall.RawConn) error {
 	if network != "tcp4" && network != "tcp6" && network != "tcp" {
 		return fmt.Errorf("webfetch: refusing non-tcp network %q", network)
 	}
@@ -30,14 +33,14 @@ func guardedControl(network, address string, _ syscall.RawConn) error {
 	if ip == nil {
 		return fmt.Errorf("webfetch: refusing to dial unresolved host %q", host)
 	}
-	if !isPublicIP(ip) {
+	if !IsPublicIP(ip) {
 		return fmt.Errorf("webfetch: refusing to connect to non-public address %s", ip)
 	}
 	return nil
 }
 
 // globalUnicastIPv6 is 2000::/3, the only IPv6 space IANA allocates for global
-// unicast. An IPv6 address outside it is never public, so isPublicIP rejects it
+// unicast. An IPv6 address outside it is never public, so IsPublicIP rejects it
 // before any other check. That alone covers loopback, link-local, multicast,
 // ULA (fc00::/7) and every reserved block outside 2000::/3, among them:
 // ::/96 (IPv4-compatible), ::ffff:0:0:0/96 (IPv4-translated, SIIT),
@@ -46,7 +49,7 @@ func guardedControl(network, address string, _ syscall.RawConn) error {
 var globalUnicastIPv6 = mustParseCIDRs("2000::/3")[0]
 
 // specialUseRanges are IANA special-use / non-globally-routable prefixes that
-// isPublicIP's other checks do not already cover. Membership in any of these
+// IsPublicIP's other checks do not already cover. Membership in any of these
 // makes an address non-public. This is a default-deny model: only
 // globally-routable unicast addresses outside every special-use range are
 // allowed. The IPv6 entries are the special-use blocks inside 2000::/3.
@@ -68,12 +71,17 @@ var specialUseRanges = mustParseCIDRs(
 	"3fff::/20",     // documentation
 )
 
-// isPublicIP reports whether ip is a globally-routable public unicast address
+// IsPublicIP reports whether ip is a globally-routable public unicast address
 // the fetcher is allowed to reach. It is a strict allowlist: loopback, private
 // (RFC1918 + ULA fc00::/7), link-local (incl. the 169.254.169.254 metadata
 // endpoint), unspecified, broadcast, multicast, IPv6 outside 2000::/3, and the
 // special-use ranges listed above are rejected — only public unicast passes.
-func isPublicIP(ip net.IP) bool {
+// A nil or malformed ip is not public.
+//
+// It judges an IP, never a hostname: checking a resolved name and then dialing
+// it is open to DNS rebinding, so a guard for outbound connections belongs in
+// GuardedControl. The rejected set may grow in any release.
+func IsPublicIP(ip net.IP) bool {
 	// Normalize IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) to its IPv4 form so the
 	// checks below cannot be bypassed via the mapped representation.
 	if v4 := ip.To4(); v4 != nil {
@@ -112,8 +120,8 @@ func mustParseCIDRs(cidrs ...string) []*net.IPNet {
 // dialControl is the net.Dialer Control hook used for all outbound requests. It
 // is a package variable (defaulting to the SSRF guard) solely so in-package
 // tests can relax it to reach a loopback httptest server; production always
-// uses guardedControl.
-var dialControl = guardedControl
+// uses GuardedControl.
+var dialControl = GuardedControl
 
 // dialContext is the shared transport's DialContext. It builds the dialer per
 // call so dialControl is read at dial time: the transport is created once for
