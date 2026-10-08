@@ -499,7 +499,8 @@ func TestFetch_TextlessPDFReportsExtractionFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a PDF without text")
 	}
-	if !strings.Contains(err.Error(), "Failed to extract PDF") {
+	// The specific reason proves the PDF parsed and the empty-text check fired.
+	if !strings.Contains(err.Error(), "Failed to extract PDF") || !strings.Contains(err.Error(), "no extractable text") {
 		t.Fatalf("unexpected error text: %v", err)
 	}
 }
