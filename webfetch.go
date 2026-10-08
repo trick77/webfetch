@@ -357,8 +357,9 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 			}
 		}
 		if opts.Selector != "" || opts.FullPage {
-			// Readability absolutizes links itself; do the same here so both
-			// paths agree (scheme, host, and directory of the page).
+			// Readability absolutizes links and drops javascript: links
+			// itself; do the same here so both paths agree (the latter in
+			// selectorMarkdown, after matching).
 			absolutizeLinks(doc, base)
 			return selectorMarkdown(doc, opts)
 		}
@@ -396,9 +397,13 @@ func selectorMarkdown(doc *goquery.Document, opts Options) string {
 	var fragment string
 	if opts.Selector != "" {
 		sel := doc.Find(opts.Selector)
+		// A match nested inside another match is already part of the outer
+		// one's HTML; keep only the outermost so nothing is emitted twice.
+		sel = sel.NotSelection(sel.Find(opts.Selector))
 		if sel.Length() == 0 {
 			return errNoSelector
 		}
+		dropScriptLinks(sel)
 		var b strings.Builder
 		sel.Each(func(_ int, s *goquery.Selection) {
 			if h, err := goquery.OuterHtml(s); err == nil {
@@ -407,6 +412,7 @@ func selectorMarkdown(doc *goquery.Document, opts Options) string {
 		})
 		fragment = b.String()
 	} else { // FullPage
+		dropScriptLinks(doc.Selection)
 		if body := doc.Find("body"); body.Length() > 0 {
 			fragment, _ = body.Html()
 		} else {
@@ -420,9 +426,24 @@ func selectorMarkdown(doc *goquery.Document, opts Options) string {
 	return markdown
 }
 
+// dropScriptLinks strips the href of every javascript: link in sel (the
+// selected elements and their descendants) so the converter renders only the
+// link text, as Readability does. The scheme test is case-insensitive and
+// trims whitespace, so it is stricter than Readability's, which keeps
+// "JavaScript:" or " javascript:" links. The element itself stays, so it runs
+// after Selector matching without changing what matched.
+func dropScriptLinks(sel *goquery.Selection) {
+	sel.Find("a[href]").AddSelection(sel.Filter("a[href]")).Each(func(_ int, s *goquery.Selection) {
+		if href, _ := s.Attr("href"); strings.HasPrefix(strings.ToLower(strings.TrimSpace(href)), "javascript:") {
+			s.RemoveAttr("href")
+		}
+	})
+}
+
 // absolutizeLinks resolves every relative href/src in doc against base, in
-// place, following the same rules as Readability's own link handling:
-// absolute references (including data:, mailto: and javascript: URIs),
+// place, following Readability's rules for the attributes the Markdown
+// converter reads: absolute references (including data:, mailto: and
+// javascript: URIs; the last are dropped later by dropScriptLinks),
 // fragment-only references ("#top"), empty values and unparsable values are
 // left untouched. A nil base is a no-op.
 func absolutizeLinks(doc *goquery.Document, base *url.URL) {

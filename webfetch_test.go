@@ -845,3 +845,48 @@ func TestFetch_ReusesConnections(t *testing.T) {
 		t.Fatalf("expected one pooled connection across sequential fetches, server saw %d", got)
 	}
 }
+
+func TestFetch_SelectorNestedMatchesNotDuplicated(t *testing.T) {
+	allowLoopback(t)
+	page := `<!doctype html><html><body><div><div><p>only once</p></div></div><p>outside</p></body></html>`
+	srv := serve(t, "text/html; charset=utf-8", []byte(page))
+	out, err := Fetch(context.Background(), srv.URL+"/x", Options{Selector: "div"})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if n := strings.Count(out, "only once"); n != 1 {
+		t.Fatalf("expected nested match once, got %d in:\n%s", n, out)
+	}
+	if strings.Contains(out, "outside") {
+		t.Fatalf("selector leaked non-matching content:\n%s", out)
+	}
+}
+
+func TestFetch_SelectorPathDropsJavascriptLinks(t *testing.T) {
+	allowLoopback(t)
+	page := `<!doctype html><html><body><div id="c">
+		<p><a href="javascript:void(0)">click me</a> and <a class="more" href=" JavaScript:go()"><b>bold</b> link</a></p>
+		</div></body></html>`
+	srv := serve(t, "text/html; charset=utf-8", []byte(page))
+	for _, opts := range []Options{{Selector: "#c"}, {FullPage: true}} {
+		out, err := Fetch(context.Background(), srv.URL+"/x", opts)
+		if err != nil {
+			t.Fatalf("Fetch error: %v", err)
+		}
+		if strings.Contains(strings.ToLower(out), "javascript:") {
+			t.Fatalf("%+v: javascript: link survived:\n%s", opts, out)
+		}
+		if !strings.Contains(out, "click me") || !strings.Contains(out, "**bold** link") {
+			t.Fatalf("%+v: link text lost:\n%s", opts, out)
+		}
+	}
+
+	// A selector that targets the javascript: link itself still matches it.
+	out, err := Fetch(context.Background(), srv.URL+"/x", Options{Selector: "a.more"})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if !strings.Contains(out, "**bold** link") || strings.Contains(out, "javascript:") {
+		t.Fatalf("selector on a javascript: link: got:\n%s", out)
+	}
+}
