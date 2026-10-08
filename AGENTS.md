@@ -35,7 +35,8 @@ The Go version follows the `go` directive in `go.mod`. There is no Makefile.
 This library deliberately reproduces the *observable contract* of upstream
 `mcp-server-fetch`. Do NOT rephrase, reformat, or "improve":
 
-- the exact upstream strings: the `<error>…</error>` messages, the
+- the exact upstream strings: the upstream `<error>…</error>` messages (not
+  `errNoSelector`, which is ours), the `Failed to fetch` prefix, the
   `Contents of %s:` prefix, and the "Content type … cannot be simplified" note
 - the autonomous `User-Agent` (`DefaultUserAgentAutonomous`)
 - the html-to-markdown config (`atx` headings, `*` bullets, `*` emphasis) — this

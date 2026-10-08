@@ -67,15 +67,12 @@ const fetchTimeout = 30 * time.Second
 // maxRedirects mirrors httpx's default max_redirects (Go's default is 10).
 const maxRedirects = 20
 
-// Upstream sentinel strings, reproduced verbatim.
+// Content sentinels. The first two are upstream's, reproduced verbatim.
 const (
 	errNoMoreContent = "<error>No more content available.</error>"
 	errSimplify      = "<error>Page failed to be simplified from HTML</error>"
+	errNoSelector    = "<error>No content matched the selector.</error>" // own, for Selector
 )
-
-// errNoSelector is this package's own sentinel for the Selector extension,
-// shaped like upstream's.
-const errNoSelector = "<error>No content matched the selector.</error>"
 
 // Options mirror the upstream tool's parameters.
 type Options struct {
@@ -259,9 +256,10 @@ func checkRedirect(_ *http.Request, via []*http.Request) error {
 }
 
 // fetchErr wraps err as upstream's "Failed to fetch <url>: <err>". The
-// capitalized string is upstream's, reproduced verbatim as part of this
-// package's observable contract; ST1005 is suppressed per site rather than in
-// .golangci.yaml, which stays identical across the repo family.
+// capitalized prefix is upstream's, reproduced verbatim as part of this
+// package's observable contract (err itself may be this package's own, e.g.
+// the body cap); ST1005 is suppressed per site rather than in .golangci.yaml,
+// which stays identical across the repo family.
 func fetchErr(rawURL string, err error) error {
 	return fmt.Errorf("Failed to fetch %s: %w", rawURL, err) //nolint:staticcheck // ST1005: upstream contract
 }

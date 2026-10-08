@@ -828,6 +828,14 @@ func TestFetch_MaxBodyBytes(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeds %d bytes", DefaultMaxBodyBytes)) {
 		t.Fatalf("expected default cap to trigger, got: %v", err)
 	}
+
+	// A negative cap is unlimited: the same over-default body is read whole.
+	if got := (Options{MaxBodyBytes: -1}).withDefaults().MaxBodyBytes; got != -1 {
+		t.Fatalf("withDefaults must keep a negative cap, got %d", got)
+	}
+	if _, err := Fetch(context.Background(), huge.URL+"/huge", Options{MaxBodyBytes: -1}); err != nil {
+		t.Fatalf("MaxBodyBytes=-1 should read past the default cap: %v", err)
+	}
 }
 
 func TestFetch_RedirectLimit(t *testing.T) {
