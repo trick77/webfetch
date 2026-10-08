@@ -67,11 +67,11 @@ const fetchTimeout = 30 * time.Second
 // maxRedirects mirrors httpx's default max_redirects (Go's default is 10).
 const maxRedirects = 20
 
-// Upstream sentinel strings, reproduced verbatim.
+// Content sentinels. The first two are upstream's, reproduced verbatim.
 const (
 	errNoMoreContent = "<error>No more content available.</error>"
 	errSimplify      = "<error>Page failed to be simplified from HTML</error>"
-	errNoSelector    = "<error>No content matched the selector.</error>"
+	errNoSelector    = "<error>No content matched the selector.</error>" // own, for Selector
 )
 
 // Options mirror the upstream tool's parameters.
@@ -145,28 +145,9 @@ func Fetch(ctx context.Context, rawURL string, opts Options) (string, error) {
 	if strings.TrimSpace(rawURL) == "" {
 		return "", fmt.Errorf("URL is required")
 	}
-	userAgent := opts.UserAgent
-	if userAgent == "" {
-		userAgent = DefaultUserAgentAutonomous
-	}
-	maxLength := opts.MaxLength
-	if maxLength <= 0 {
-		maxLength = defaultMaxLength
-	}
-	startIndex := opts.StartIndex
-	if startIndex < 0 {
-		startIndex = 0
-	}
-	// Resolved cap: 0 = default, negative = unlimited (passed on as 0).
-	maxBody := opts.MaxBodyBytes
-	switch {
-	case maxBody == 0:
-		maxBody = DefaultMaxBodyBytes
-	case maxBody < 0:
-		maxBody = 0
-	}
+	opts = opts.withDefaults()
 
-	content, prefix, err := fetchURL(ctx, rawURL, userAgent, maxBody, opts)
+	content, prefix, err := fetchURL(ctx, rawURL, opts)
 	if err != nil {
 		return "", err
 	}
@@ -175,24 +156,39 @@ func Fetch(ctx context.Context, rawURL string, opts Options) (string, error) {
 	// checks "start_index >= len(content)" and then "not truncated_content";
 	// with max_length > 0 the second is implied by the first, so one empty
 	// check covers both.
-	out, got, total := sliceRunes(content, startIndex, maxLength)
+	out, got, total := sliceRunes(content, opts.StartIndex, opts.MaxLength)
 	if out == "" {
 		out = errNoMoreContent
-	} else if remaining := total - (startIndex + got); got == maxLength && remaining > 0 {
-		out += fmt.Sprintf("\n\n<error>Content truncated. Call the fetch tool with a start_index of %d to get more content.</error>", startIndex+got)
+	} else if remaining := total - (opts.StartIndex + got); got == opts.MaxLength && remaining > 0 {
+		out += fmt.Sprintf("\n\n<error>Content truncated. Call the fetch tool with a start_index of %d to get more content.</error>", opts.StartIndex+got)
 	}
 	return fmt.Sprintf("%sContents of %s:\n%s", prefix, rawURL, out), nil
 }
 
-// fetchURL fetches the URL and returns (content, prefix). content is either
+// withDefaults resolves the zero-value defaults: the autonomous User-Agent,
+// the upstream MaxLength, a non-negative StartIndex, and DefaultMaxBodyBytes.
+// A negative MaxBodyBytes stays negative and means unlimited.
+func (o Options) withDefaults() Options {
+	if o.UserAgent == "" {
+		o.UserAgent = DefaultUserAgentAutonomous
+	}
+	if o.MaxLength <= 0 {
+		o.MaxLength = defaultMaxLength
+	}
+	if o.StartIndex < 0 {
+		o.StartIndex = 0
+	}
+	if o.MaxBodyBytes == 0 {
+		o.MaxBodyBytes = DefaultMaxBodyBytes
+	}
+	return o
+}
+
+// fetchURL fetches the URL with already-resolved opts. content is either
 // extracted Markdown or the raw body, always valid UTF-8; prefix is the
 // non-empty note prepended for non-simplifiable content types, matching
-// upstream. maxBody is the resolved body cap in bytes (0 = unlimited).
-// The capitalized error strings below are upstream's, reproduced verbatim as
-// part of this package's observable contract (see the package doc). ST1005 is
-// suppressed per site rather than in .golangci.yaml, which stays identical
-// across the repo family.
-func fetchURL(ctx context.Context, rawURL, userAgent string, maxBody int64, opts Options) (string, string, error) {
+// upstream.
+func fetchURL(ctx context.Context, rawURL string, opts Options) (content, prefix string, err error) {
 	client := &http.Client{
 		Timeout:       fetchTimeout,
 		Transport:     sharedTransport(),
@@ -200,24 +196,24 @@ func fetchURL(ctx context.Context, rawURL, userAgent string, maxBody int64, opts
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return "", "", fmt.Errorf("Failed to fetch %s: %w", rawURL, err) //nolint:staticcheck // ST1005: upstream contract
+		return "", "", fetchErr(rawURL, err)
 	}
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", opts.UserAgent)
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("Failed to fetch %s: %w", rawURL, err) //nolint:staticcheck // ST1005: upstream contract
+		return "", "", fetchErr(rawURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return "", "", fmt.Errorf("Failed to fetch %s - status code %d", rawURL, resp.StatusCode) //nolint:staticcheck // ST1005: upstream contract
 	}
 
-	if maxBody > 0 && resp.ContentLength > maxBody {
-		return "", "", fmt.Errorf("Failed to fetch %s: response body exceeds %d bytes", rawURL, maxBody) //nolint:staticcheck // ST1005: upstream contract
+	if opts.MaxBodyBytes > 0 && resp.ContentLength > opts.MaxBodyBytes {
+		return "", "", fetchErr(rawURL, errBodyTooLarge(opts.MaxBodyBytes))
 	}
-	bodyBytes, err := readBody(resp.Body, maxBody)
+	bodyBytes, err := readBody(resp.Body, opts.MaxBodyBytes)
 	if err != nil {
-		return "", "", fmt.Errorf("Failed to fetch %s: %w", rawURL, err) //nolint:staticcheck // ST1005: upstream contract
+		return "", "", fetchErr(rawURL, err)
 	}
 	contentType := resp.Header.Get("content-type")
 
@@ -226,14 +222,14 @@ func fetchURL(ctx context.Context, rawURL, userAgent string, maxBody int64, opts
 	if opts.ExtractPDF && !opts.Raw && isPDF(contentType, bodyBytes) {
 		text, pdfErr := extractPDFText(bodyBytes)
 		if pdfErr != nil {
-			return "", "", fmt.Errorf("Failed to extract PDF %s: %w", rawURL, pdfErr) //nolint:staticcheck // ST1005: upstream contract
+			return "", "", fmt.Errorf("Failed to extract PDF %s: %w", rawURL, pdfErr) //nolint:staticcheck // ST1005: matches the upstream-style messages
 		}
 		return text, "", nil
 	}
 
 	pageRaw, err := decodeBody(bodyBytes, contentType)
 	if err != nil {
-		return "", "", fmt.Errorf("Failed to fetch %s: %w", rawURL, err) //nolint:staticcheck // ST1005: upstream contract
+		return "", "", fetchErr(rawURL, err)
 	}
 
 	// Upstream: '"<html" in page_raw[:100]' — a character slice, not bytes.
@@ -259,9 +255,23 @@ func checkRedirect(_ *http.Request, via []*http.Request) error {
 	return nil
 }
 
+// fetchErr wraps err as upstream's "Failed to fetch <url>: <err>". The
+// capitalized prefix is upstream's, reproduced verbatim as part of this
+// package's observable contract (err itself may be this package's own, e.g.
+// the body cap); ST1005 is suppressed per site rather than in .golangci.yaml,
+// which stays identical across the repo family.
+func fetchErr(rawURL string, err error) error {
+	return fmt.Errorf("Failed to fetch %s: %w", rawURL, err) //nolint:staticcheck // ST1005: upstream contract
+}
+
+func errBodyTooLarge(limit int64) error {
+	return fmt.Errorf("response body exceeds %d bytes", limit)
+}
+
 // readBody reads r in full. With limit > 0 a body longer than limit bytes is
-// rejected (after reading at most limit+1 bytes) rather than buffered whole.
-// math.MaxInt64 is treated as unlimited so limit+1 cannot overflow.
+// rejected (after reading at most limit+1 bytes) rather than buffered whole;
+// limit <= 0 means unlimited. math.MaxInt64 is treated as unlimited so
+// limit+1 cannot overflow.
 func readBody(r io.Reader, limit int64) ([]byte, error) {
 	if limit <= 0 || limit == math.MaxInt64 {
 		return io.ReadAll(r)
@@ -271,7 +281,7 @@ func readBody(r io.Reader, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if int64(len(b)) > limit {
-		return nil, fmt.Errorf("response body exceeds %d bytes", limit)
+		return nil, errBodyTooLarge(limit)
 	}
 	return b, nil
 }
