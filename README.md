@@ -102,6 +102,12 @@ that cannot be parsed, or parses but yields no text (a scan without OCR),
 returns a `Failed to extract PDF` error, so a caller's fallback can take over.
 Left `false` (the default), the upstream raw-bytes behaviour is preserved.
 
+> **Enable only for trusted sources.** The PDF parser has no resource limits:
+> a crafted PDF well under `MaxBodyBytes` can decompress or allocate gigabytes
+> and exhaust CPU or memory, and an out-of-memory crash takes the process down.
+> For model-chosen or otherwise untrusted URLs, leave `ExtractPDF` off and send
+> PDFs to an isolated fallback reader (e.g. a sandboxed headless browser).
+
 ### Extension: full-page & selector escape hatch (off by default)
 
 When Readability over-strips (docs pages, tables, sidebars you actually want),
