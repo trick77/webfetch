@@ -283,10 +283,11 @@ func readBody(r io.Reader, limit int64) ([]byte, error) {
 // steps only kick in on pages upstream would have garbled. The UTF-8 check is
 // what keeps the library's last-resort guess from turning a UTF-8 body into
 // mojibake whenever its first KiB happens to be pure ASCII. Valid UTF-8 also
-// skips the decoder copy entirely.
+// skips the decoder copy entirely. ISO-2022-JP is the exception: it is 7-bit,
+// so its bytes are always valid UTF-8, and a declared one must still be decoded.
 func decodeBody(body []byte, contentType string) (string, error) {
 	enc, name, certain := charset.DetermineEncoding(body, contentType)
-	if utf8.Valid(body) && (name == "utf-8" || !certain) {
+	if utf8.Valid(body) && (name == "utf-8" || !certain) && name != "iso-2022-jp" {
 		return string(body), nil
 	}
 	decoded, err := enc.NewDecoder().Bytes(body)
@@ -357,8 +358,9 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 			}
 		}
 		if opts.Selector != "" || opts.FullPage {
-			// Readability absolutizes links itself; do the same here so both
-			// paths agree (scheme, host, and directory of the page).
+			// Readability absolutizes links and drops javascript: links
+			// itself; do the same here so both paths agree.
+			dropScriptLinks(doc)
 			absolutizeLinks(doc, base)
 			return selectorMarkdown(doc, opts)
 		}
@@ -396,6 +398,9 @@ func selectorMarkdown(doc *goquery.Document, opts Options) string {
 	var fragment string
 	if opts.Selector != "" {
 		sel := doc.Find(opts.Selector)
+		// A match nested inside another match is already part of the outer
+		// one's HTML; keep only the outermost so nothing is emitted twice.
+		sel = sel.NotSelection(sel.Find(opts.Selector))
 		if sel.Length() == 0 {
 			return errNoSelector
 		}
@@ -420,9 +425,26 @@ func selectorMarkdown(doc *goquery.Document, opts Options) string {
 	return markdown
 }
 
+// dropScriptLinks replaces every javascript: link in doc with its contents, as
+// Readability does: the link cannot work once scripts are gone, but its text
+// stays.
+func dropScriptLinks(doc *goquery.Document) {
+	doc.Find("a[href]").Each(func(_ int, s *goquery.Selection) {
+		href, _ := s.Attr("href")
+		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(href)), "javascript:") {
+			return
+		}
+		if contents := s.Contents(); contents.Length() > 0 {
+			s.ReplaceWithSelection(contents)
+		} else {
+			s.Remove()
+		}
+	})
+}
+
 // absolutizeLinks resolves every relative href/src in doc against base, in
-// place, following the same rules as Readability's own link handling:
-// absolute references (including data:, mailto: and javascript: URIs),
+// place, following Readability's rules for the attributes the Markdown
+// converter reads: absolute references (including data: and mailto: URIs),
 // fragment-only references ("#top"), empty values and unparsable values are
 // left untouched. A nil base is a no-op.
 func absolutizeLinks(doc *goquery.Document, base *url.URL) {

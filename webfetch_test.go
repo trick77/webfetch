@@ -845,3 +845,54 @@ func TestFetch_ReusesConnections(t *testing.T) {
 		t.Fatalf("expected one pooled connection across sequential fetches, server saw %d", got)
 	}
 }
+
+func TestFetch_SelectorNestedMatchesNotDuplicated(t *testing.T) {
+	allowLoopback(t)
+	page := `<!doctype html><html><body><div><div><p>only once</p></div></div><p>outside</p></body></html>`
+	srv := serve(t, "text/html; charset=utf-8", []byte(page))
+	out, err := Fetch(context.Background(), srv.URL+"/x", Options{Selector: "div"})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if n := strings.Count(out, "only once"); n != 1 {
+		t.Fatalf("expected nested match once, got %d in:\n%s", n, out)
+	}
+	if strings.Contains(out, "outside") {
+		t.Fatalf("selector leaked non-matching content:\n%s", out)
+	}
+}
+
+func TestFetch_MetaDeclaredISO2022JP(t *testing.T) {
+	allowLoopback(t)
+	// "日本" in ISO-2022-JP: 7-bit only, so the bytes are also valid UTF-8 and
+	// must not be mistaken for it when a meta charset says otherwise.
+	body := []byte("<html><head><meta charset=\"iso-2022-jp\"></head><body><p>\x1b$BF|K\\\x1b(B</p></body></html>")
+	srv := serve(t, "text/html", body)
+	out, err := Fetch(context.Background(), srv.URL+"/x", Options{Raw: true})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if !strings.Contains(out, "日本") {
+		t.Fatalf("expected ISO-2022-JP to be decoded, got:\n%q", out)
+	}
+}
+
+func TestFetch_SelectorPathDropsJavascriptLinks(t *testing.T) {
+	allowLoopback(t)
+	page := `<!doctype html><html><body><div id="c">
+		<p><a href="javascript:void(0)">click me</a> and <a href=" JavaScript:go()"><b>bold</b> link</a></p>
+		</div></body></html>`
+	srv := serve(t, "text/html; charset=utf-8", []byte(page))
+	for _, opts := range []Options{{Selector: "#c"}, {FullPage: true}} {
+		out, err := Fetch(context.Background(), srv.URL+"/x", opts)
+		if err != nil {
+			t.Fatalf("Fetch error: %v", err)
+		}
+		if strings.Contains(strings.ToLower(out), "javascript:") {
+			t.Fatalf("%+v: javascript: link survived:\n%s", opts, out)
+		}
+		if !strings.Contains(out, "click me") || !strings.Contains(out, "**bold** link") {
+			t.Fatalf("%+v: link text lost:\n%s", opts, out)
+		}
+	}
+}
