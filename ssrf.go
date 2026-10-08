@@ -30,14 +30,14 @@ func guardedControl(network, address string, _ syscall.RawConn) error {
 	if ip == nil {
 		return fmt.Errorf("webfetch: refusing to dial unresolved host %q", host)
 	}
-	if !isPublicIP(ip) {
+	if !IsPublicIP(ip) {
 		return fmt.Errorf("webfetch: refusing to connect to non-public address %s", ip)
 	}
 	return nil
 }
 
 // globalUnicastIPv6 is 2000::/3, the only IPv6 space IANA allocates for global
-// unicast. An IPv6 address outside it is never public, so isPublicIP rejects it
+// unicast. An IPv6 address outside it is never public, so IsPublicIP rejects it
 // before any other check. That alone covers loopback, link-local, multicast,
 // ULA (fc00::/7) and every reserved block outside 2000::/3, among them:
 // ::/96 (IPv4-compatible), ::ffff:0:0:0/96 (IPv4-translated, SIIT),
@@ -46,7 +46,7 @@ func guardedControl(network, address string, _ syscall.RawConn) error {
 var globalUnicastIPv6 = mustParseCIDRs("2000::/3")[0]
 
 // specialUseRanges are IANA special-use / non-globally-routable prefixes that
-// isPublicIP's other checks do not already cover. Membership in any of these
+// IsPublicIP's other checks do not already cover. Membership in any of these
 // makes an address non-public. This is a default-deny model: only
 // globally-routable unicast addresses outside every special-use range are
 // allowed. The IPv6 entries are the special-use blocks inside 2000::/3.
@@ -68,12 +68,13 @@ var specialUseRanges = mustParseCIDRs(
 	"3fff::/20",     // documentation
 )
 
-// isPublicIP reports whether ip is a globally-routable public unicast address
+// IsPublicIP reports whether ip is a globally-routable public unicast address
 // the fetcher is allowed to reach. It is a strict allowlist: loopback, private
 // (RFC1918 + ULA fc00::/7), link-local (incl. the 169.254.169.254 metadata
 // endpoint), unspecified, broadcast, multicast, IPv6 outside 2000::/3, and the
 // special-use ranges listed above are rejected — only public unicast passes.
-func isPublicIP(ip net.IP) bool {
+// It is exported so a caller that dials on its own applies the same guard.
+func IsPublicIP(ip net.IP) bool {
 	// Normalize IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) to its IPv4 form so the
 	// checks below cannot be bypassed via the mapped representation.
 	if v4 := ip.To4(); v4 != nil {
