@@ -7,10 +7,13 @@ import (
 	"syscall"
 )
 
-// guardedControl is a net.Dialer Control hook that rejects connections to
+// GuardedControl is a net.Dialer Control hook that rejects connections to
 // non-public IP addresses. It runs after DNS resolution with the concrete IP
 // the socket is about to connect to, so it also blocks DNS-rebinding to a
 // private target.
+//
+// It is exported so a caller that makes its own requests gets the same guard:
+// set it as the Control of the net.Dialer its transport dials through.
 //
 // This replaces the SSRF protection that the deployment previously got for
 // free by isolating the fetch sidecar on its own Docker network: with fetch
@@ -18,7 +21,7 @@ import (
 // injected) URL could otherwise reach loopback, RFC1918 hosts, or the cloud
 // metadata endpoint (169.254.169.254). Blocking is done here, in the dialer,
 // because that is the only place the real destination IP is known.
-func guardedControl(network, address string, _ syscall.RawConn) error {
+func GuardedControl(network, address string, _ syscall.RawConn) error {
 	if network != "tcp4" && network != "tcp6" && network != "tcp" {
 		return fmt.Errorf("webfetch: refusing non-tcp network %q", network)
 	}
@@ -73,7 +76,11 @@ var specialUseRanges = mustParseCIDRs(
 // (RFC1918 + ULA fc00::/7), link-local (incl. the 169.254.169.254 metadata
 // endpoint), unspecified, broadcast, multicast, IPv6 outside 2000::/3, and the
 // special-use ranges listed above are rejected — only public unicast passes.
-// It is exported so a caller that dials on its own applies the same guard.
+// A nil or malformed ip is not public.
+//
+// It judges an IP, never a hostname: checking a resolved name and then dialing
+// it is open to DNS rebinding, so a guard for outbound connections belongs in
+// GuardedControl. The rejected set may grow in any release.
 func IsPublicIP(ip net.IP) bool {
 	// Normalize IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) to its IPv4 form so the
 	// checks below cannot be bypassed via the mapped representation.
@@ -113,8 +120,8 @@ func mustParseCIDRs(cidrs ...string) []*net.IPNet {
 // dialControl is the net.Dialer Control hook used for all outbound requests. It
 // is a package variable (defaulting to the SSRF guard) solely so in-package
 // tests can relax it to reach a loopback httptest server; production always
-// uses guardedControl.
-var dialControl = guardedControl
+// uses GuardedControl.
+var dialControl = GuardedControl
 
 // dialContext is the shared transport's DialContext. It builds the dialer per
 // call so dialControl is read at dial time: the transport is created once for

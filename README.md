@@ -176,3 +176,9 @@ default-deny allowlist; the following are refused:
 - broadcast, multicast, and IANA special-use / documentation / benchmarking
   ranges
 - IPv4-mapped IPv6 forms of any of the above (normalized before checking)
+
+Code that makes its own requests can reuse the guard: set
+`webfetch.GuardedControl` as the `Control` of the `net.Dialer` its transport
+dials through. `webfetch.IsPublicIP` answers the same question for a single
+IP; use it only on an IP, never to vet a hostname before dialing it (DNS
+rebinding). The rejected set may grow in any release.

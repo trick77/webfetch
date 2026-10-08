@@ -372,14 +372,34 @@ func TestSSRF_GuardAllowsOnlyPublic(t *testing.T) {
 	}
 	for _, addr := range blocked {
 		// Rejected by the public-address rule, not by some parse failure.
-		if err := guardedControl("tcp", addr, nil); err == nil || !strings.Contains(err.Error(), "non-public") {
+		if err := GuardedControl("tcp", addr, nil); err == nil || !strings.Contains(err.Error(), "non-public") {
 			t.Errorf("expected %s to be blocked as non-public, got: %v", addr, err)
 		}
 	}
 	allowed := []string{"1.1.1.1:443", "8.8.8.8:53", "93.184.216.34:80", "[2606:4700:4700::1111]:443", "[2a00:1450:4001::1]:443", "[2400:cb00::1]:443"}
 	for _, addr := range allowed {
-		if err := guardedControl("tcp", addr, nil); err != nil {
+		if err := GuardedControl("tcp", addr, nil); err != nil {
 			t.Errorf("expected %s to be allowed, got: %v", addr, err)
+		}
+	}
+}
+
+func TestIsPublicIP(t *testing.T) {
+	cases := []struct {
+		ip   net.IP
+		want bool
+	}{
+		{net.ParseIP("1.1.1.1"), true},
+		{net.ParseIP("2606:4700:4700::1111"), true},
+		{net.ParseIP("127.0.0.1"), false},
+		{net.ParseIP("::ffff:10.0.0.1"), false},
+		{net.ParseIP("2001:db8::1"), false},
+		{nil, false},
+		{net.IP{1, 2, 3}, false},
+	}
+	for _, c := range cases {
+		if got := IsPublicIP(c.ip); got != c.want {
+			t.Errorf("IsPublicIP(%v) = %v, want %v", c.ip, got, c.want)
 		}
 	}
 }
@@ -397,8 +417,8 @@ func TestFetch_SSRFBlocksLoopbackEndToEnd(t *testing.T) {
 	}
 }
 
-// compile-time nod that guardedControl matches the Dialer.Control signature.
-var _ func(string, string, syscall.RawConn) error = guardedControl
+// compile-time nod that GuardedControl matches the Dialer.Control signature.
+var _ func(string, string, syscall.RawConn) error = GuardedControl
 
 // The error paths below were previously untested. They assert errors.Is
 // unwrapping too: fetchURL wraps with %w, and a caller distinguishing a
