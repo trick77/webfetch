@@ -362,13 +362,21 @@ func TestSSRF_GuardAllowsOnlyPublic(t *testing.T) {
 		"[2002:7f00:1::1]:80",   // 6to4 of 127.0.0.1
 		"[fec0::1]:80",          // IPv6 site-local (deprecated)
 		"[2001:2::1]:80",        // IPv6 benchmarking
+		"[::ffff:0:7f00:1]:80",  // IPv4-translated (SIIT) 127.0.0.1
+		"[2001::7f00:1]:80",     // Teredo
+		"[2001:10::1]:80",       // ORCHID
+		"[2001:20::1]:80",       // ORCHIDv2
+		"[100:0:0:1::1]:80",     // dummy prefix
+		"[4000::1]:80",          // unallocated (outside 2000::/3)
+		"[1::1]:80",             // unallocated (outside 2000::/3)
 	}
 	for _, addr := range blocked {
-		if err := guardedControl("tcp", addr, nil); err == nil {
-			t.Errorf("expected %s to be blocked", addr)
+		// Rejected by the public-address rule, not by some parse failure.
+		if err := guardedControl("tcp", addr, nil); err == nil || !strings.Contains(err.Error(), "non-public") {
+			t.Errorf("expected %s to be blocked as non-public, got: %v", addr, err)
 		}
 	}
-	allowed := []string{"1.1.1.1:443", "8.8.8.8:53", "93.184.216.34:80", "[2606:4700:4700::1111]:443"}
+	allowed := []string{"1.1.1.1:443", "8.8.8.8:53", "93.184.216.34:80", "[2606:4700:4700::1111]:443", "[2a00:1450:4001::1]:443", "[2400:cb00::1]:443"}
 	for _, addr := range allowed {
 		if err := guardedControl("tcp", addr, nil); err != nil {
 			t.Errorf("expected %s to be allowed, got: %v", addr, err)
