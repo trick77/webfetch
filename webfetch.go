@@ -283,14 +283,10 @@ func readBody(r io.Reader, limit int64) ([]byte, error) {
 // steps only kick in on pages upstream would have garbled. The UTF-8 check is
 // what keeps the library's last-resort guess from turning a UTF-8 body into
 // mojibake whenever its first KiB happens to be pure ASCII. Valid UTF-8 also
-// skips the decoder copy entirely. ISO-2022-JP is the exception: it is 7-bit,
-// so its bytes are always valid UTF-8; a declared one is decoded when the body
-// carries its ESC shift sequences (pure ASCII decodes to itself, and 8-bit
-// content means the declaration is wrong).
+// skips the decoder copy entirely.
 func decodeBody(body []byte, contentType string) (string, error) {
 	enc, name, certain := charset.DetermineEncoding(body, contentType)
-	iso2022 := name == "iso-2022-jp" && bytes.IndexByte(body, 0x1b) >= 0 && isASCII(body)
-	if utf8.Valid(body) && (name == "utf-8" || !certain) && !iso2022 {
+	if utf8.Valid(body) && (name == "utf-8" || !certain) {
 		return string(body), nil
 	}
 	decoded, err := enc.NewDecoder().Bytes(body)
@@ -300,16 +296,6 @@ func decodeBody(body []byte, contentType string) (string, error) {
 	// Decoders substitute U+FFFD for undecodable input; enforce the invariant
 	// regardless, since sliceRunes relies on it.
 	return strings.ToValidUTF8(string(decoded), "\uFFFD"), nil
-}
-
-// isASCII reports whether b holds only 7-bit bytes.
-func isASCII(b []byte) bool {
-	for _, c := range b {
-		if c >= utf8.RuneSelf {
-			return false
-		}
-	}
-	return true
 }
 
 // firstRunes returns the first n runes of s (all of s if shorter).

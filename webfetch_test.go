@@ -862,31 +862,6 @@ func TestFetch_SelectorNestedMatchesNotDuplicated(t *testing.T) {
 	}
 }
 
-func TestFetch_MetaDeclaredISO2022JP(t *testing.T) {
-	allowLoopback(t)
-	// "日本" in ISO-2022-JP: 7-bit only, so the bytes are also valid UTF-8 and
-	// must not be mistaken for it when a meta charset says otherwise.
-	body := []byte("<html><head><meta charset=\"iso-2022-jp\"></head><body><p>\x1b$BF|K\\\x1b(B</p></body></html>")
-	srv := serve(t, "text/html", body)
-	out, err := Fetch(context.Background(), srv.URL+"/x", Options{Raw: true})
-	if err != nil {
-		t.Fatalf("Fetch error: %v", err)
-	}
-	if !strings.Contains(out, "日本") {
-		t.Fatalf("expected ISO-2022-JP to be decoded, got:\n%q", out)
-	}
-
-	// A wrong iso-2022-jp declaration on a real UTF-8 body keeps the UTF-8.
-	srv = serve(t, "text/html", []byte(`<html><head><meta charset="iso-2022-jp"></head><body><p>日本語</p></body></html>`))
-	out, err = Fetch(context.Background(), srv.URL+"/x", Options{Raw: true})
-	if err != nil {
-		t.Fatalf("Fetch error: %v", err)
-	}
-	if !strings.Contains(out, "日本語") {
-		t.Fatalf("expected mislabelled UTF-8 to survive, got:\n%q", out)
-	}
-}
-
 func TestFetch_SelectorPathDropsJavascriptLinks(t *testing.T) {
 	allowLoopback(t)
 	page := `<!doctype html><html><body><div id="c">
