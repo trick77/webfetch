@@ -357,6 +357,11 @@ func TestSSRF_GuardAllowsOnlyPublic(t *testing.T) {
 		"[fe80::1]:80",          // IPv6 link-local
 		"[2001:db8::1]:80",      // IPv6 documentation
 		"[::ffff:127.0.0.1]:80", // IPv4-mapped loopback (bypass attempt)
+		"[::127.0.0.1]:80",      // IPv4-compatible loopback
+		"[64:ff9b::7f00:1]:80",  // NAT64 of 127.0.0.1
+		"[2002:7f00:1::1]:80",   // 6to4 of 127.0.0.1
+		"[fec0::1]:80",          // IPv6 site-local (deprecated)
+		"[2001:2::1]:80",        // IPv6 benchmarking
 	}
 	for _, addr := range blocked {
 		if err := guardedControl("tcp", addr, nil); err == nil {
