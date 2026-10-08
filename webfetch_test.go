@@ -865,7 +865,7 @@ func TestFetch_SelectorNestedMatchesNotDuplicated(t *testing.T) {
 func TestFetch_SelectorPathDropsJavascriptLinks(t *testing.T) {
 	allowLoopback(t)
 	page := `<!doctype html><html><body><div id="c">
-		<p><a href="javascript:void(0)">click me</a> and <a class="more" href="javascript:go()"><b>bold</b> link</a></p>
+		<p><a href="javascript:void(0)">click me</a> and <a class="more" href=" JavaScript:go()"><b>bold</b> link</a></p>
 		</div></body></html>`
 	srv := serve(t, "text/html; charset=utf-8", []byte(page))
 	for _, opts := range []Options{{Selector: "#c"}, {FullPage: true}} {
