@@ -38,16 +38,18 @@ func guardedControl(network, address string, _ syscall.RawConn) error {
 
 // globalUnicastIPv6 is 2000::/3, the only IPv6 space IANA allocates for global
 // unicast. An IPv6 address outside it is never public, so isPublicIP rejects it
-// before consulting specialUseRanges; any reserved block outside 2000::/3 is
-// covered without being listed.
+// before any other check. That alone covers loopback, link-local, multicast,
+// ULA (fc00::/7) and every reserved block outside 2000::/3, among them:
+// ::/96 (IPv4-compatible), ::ffff:0:0:0/96 (IPv4-translated, SIIT),
+// 64:ff9b::/96 and 64:ff9b:1::/48 (NAT64), 100::/64 (discard),
+// 100:0:0:1::/64 (dummy), 5f00::/16 (SRv6), fec0::/10 (site-local).
 var globalUnicastIPv6 = mustParseCIDRs("2000::/3")[0]
 
 // specialUseRanges are IANA special-use / non-globally-routable prefixes that
-// net's stdlib predicates (used in isPublicIP) do not already cover. Membership
-// in any of these makes an address non-public. This is a default-deny model:
-// only globally-routable unicast addresses outside every special-use range are
-// allowed. IPv6 entries outside 2000::/3 are already rejected by
-// globalUnicastIPv6 and stay listed only as documentation.
+// isPublicIP's other checks do not already cover. Membership in any of these
+// makes an address non-public. This is a default-deny model: only
+// globally-routable unicast addresses outside every special-use range are
+// allowed. The IPv6 entries are the special-use blocks inside 2000::/3.
 var specialUseRanges = mustParseCIDRs(
 	// IPv4
 	"0.0.0.0/8",       // "this host on this network"
@@ -60,18 +62,10 @@ var specialUseRanges = mustParseCIDRs(
 	"203.0.113.0/24",  // TEST-NET-3 (documentation)
 	"240.0.0.0/4",     // reserved / future use (incl. 255.255.255.255)
 	// IPv6
-	"::/96",           // IPv4-compatible IPv6 (deprecated; e.g. ::127.0.0.1)
-	"::ffff:0:0:0/96", // IPv4-translated (SIIT, RFC 2765)
-	"64:ff9b::/96",    // NAT64
-	"64:ff9b:1::/48",  // local-use NAT64
-	"100::/64",        // discard-only
-	"100:0:0:1::/64",  // dummy prefix (RFC 9780)
-	"2001::/23",       // IETF protocol assignments (incl. Teredo, benchmarking, ORCHID)
-	"2001:db8::/32",   // documentation
-	"2002::/16",       // 6to4
-	"3fff::/20",       // documentation
-	"5f00::/16",       // segment routing (SRv6)
-	"fec0::/10",       // site-local (deprecated, RFC 3879)
+	"2001::/23",     // IETF protocol assignments (incl. Teredo, benchmarking, ORCHID)
+	"2001:db8::/32", // documentation
+	"2002::/16",     // 6to4
+	"3fff::/20",     // documentation
 )
 
 // isPublicIP reports whether ip is a globally-routable public unicast address
@@ -87,8 +81,9 @@ func isPublicIP(ip net.IP) bool {
 	} else if !globalUnicastIPv6.Contains(ip) {
 		return false
 	}
-	// IsGlobalUnicast rejects unspecified, loopback, broadcast, multicast, and
-	// link-local; IsPrivate rejects RFC1918 and IPv6 ULA (fc00::/7).
+	// For IPv4: IsGlobalUnicast rejects unspecified, loopback, broadcast,
+	// multicast, and link-local; IsPrivate rejects RFC1918. IPv6 reaching here
+	// is already inside 2000::/3, where both are no-ops.
 	if !ip.IsGlobalUnicast() || ip.IsPrivate() {
 		return false
 	}
