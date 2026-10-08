@@ -8,9 +8,13 @@ Python `mcp-server-fetch`. Callers use it in-process:
 `webfetch.Fetch(ctx, url, webfetch.Options{...})`.
 
 Staying fully **in-process** — no subprocess, no sidecar container — is the whole
-point of the port. Keep it that way: any new dependency must be pure-Go (the PDF
-path uses a pure-Go parser for exactly this reason), and keep the dependency set
-minimal.
+point of the port. Keep it that way: any new dependency must be pure-Go, and keep the
+dependency set minimal.
+
+webfetch guards the download (SSRF, size caps), not every parser threat. PDFs
+are not parsed here: `PDFHandler` hands the bytes to the caller, who isolates
+the parser. Don't add an in-process PDF parser back (a bomb can't be bounded,
+#30).
 
 ## Commands
 
@@ -47,7 +51,7 @@ This library deliberately reproduces the *observable contract* of upstream
 **Extending is fine; diverging by default is not.** Capabilities beyond upstream
 are added as opt-in `Options` fields that default to off, so a zero-value
 `Options` produces byte-identical output. Follow that pattern for anything new.
-Existing extensions: `IncludeMetadata`, `ExtractPDF`, and the `FullPage` /
+Existing extensions: `IncludeMetadata`, `PDFHandler` (+ `MaxPDFBytes`), and the `FullPage` /
 `Selector` / `ExcludeSelectors` escape hatch.
 
 The one deliberate exception is `MaxBodyBytes`: it defaults to a 10 MiB cap
