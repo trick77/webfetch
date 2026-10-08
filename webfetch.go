@@ -136,8 +136,9 @@ type Options struct {
 // "<prefix>Contents of <url>:\n<content>". Outbound connections are restricted
 // to public IPs by the SSRF guard in the dialer.
 //
-// It returns a non-nil error on connection failure, HTTP status >= 400, or a
-// response body over MaxBodyBytes. Callers that have an alternate reader (e.g.
+// It returns a non-nil error on connection failure, HTTP status >= 400, a
+// response body over MaxBodyBytes, or (with ExtractPDF) a PDF that cannot be
+// parsed or yields no text. Callers that have an alternate reader (e.g.
 // a headless-browser fallback) should treat a non-nil error as "try the
 // fallback".
 func Fetch(ctx context.Context, rawURL string, opts Options) (string, error) {
