@@ -284,10 +284,13 @@ func readBody(r io.Reader, limit int64) ([]byte, error) {
 // what keeps the library's last-resort guess from turning a UTF-8 body into
 // mojibake whenever its first KiB happens to be pure ASCII. Valid UTF-8 also
 // skips the decoder copy entirely. ISO-2022-JP is the exception: it is 7-bit,
-// so its bytes are always valid UTF-8, and a declared one must still be decoded.
+// so its bytes are always valid UTF-8; a declared one is decoded when the body
+// carries its ESC shift sequences (pure ASCII decodes to itself, and 8-bit
+// content means the declaration is wrong).
 func decodeBody(body []byte, contentType string) (string, error) {
 	enc, name, certain := charset.DetermineEncoding(body, contentType)
-	if utf8.Valid(body) && (name == "utf-8" || !certain) && name != "iso-2022-jp" {
+	iso2022 := name == "iso-2022-jp" && bytes.IndexByte(body, 0x1b) >= 0 && isASCII(body)
+	if utf8.Valid(body) && (name == "utf-8" || !certain) && !iso2022 {
 		return string(body), nil
 	}
 	decoded, err := enc.NewDecoder().Bytes(body)
@@ -297,6 +300,16 @@ func decodeBody(body []byte, contentType string) (string, error) {
 	// Decoders substitute U+FFFD for undecodable input; enforce the invariant
 	// regardless, since sliceRunes relies on it.
 	return strings.ToValidUTF8(string(decoded), "\uFFFD"), nil
+}
+
+// isASCII reports whether b holds only 7-bit bytes.
+func isASCII(b []byte) bool {
+	for _, c := range b {
+		if c >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
 }
 
 // firstRunes returns the first n runes of s (all of s if shorter).
@@ -359,8 +372,8 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 		}
 		if opts.Selector != "" || opts.FullPage {
 			// Readability absolutizes links and drops javascript: links
-			// itself; do the same here so both paths agree.
-			dropScriptLinks(doc)
+			// itself; do the same here so both paths agree (the latter in
+			// selectorMarkdown, after matching).
 			absolutizeLinks(doc, base)
 			return selectorMarkdown(doc, opts)
 		}
@@ -404,6 +417,7 @@ func selectorMarkdown(doc *goquery.Document, opts Options) string {
 		if sel.Length() == 0 {
 			return errNoSelector
 		}
+		dropScriptLinks(sel)
 		var b strings.Builder
 		sel.Each(func(_ int, s *goquery.Selection) {
 			if h, err := goquery.OuterHtml(s); err == nil {
@@ -412,6 +426,7 @@ func selectorMarkdown(doc *goquery.Document, opts Options) string {
 		})
 		fragment = b.String()
 	} else { // FullPage
+		dropScriptLinks(doc.Selection)
 		if body := doc.Find("body"); body.Length() > 0 {
 			fragment, _ = body.Html()
 		} else {
@@ -425,19 +440,15 @@ func selectorMarkdown(doc *goquery.Document, opts Options) string {
 	return markdown
 }
 
-// dropScriptLinks replaces every javascript: link in doc with its contents, as
-// Readability does: the link cannot work once scripts are gone, but its text
-// stays.
-func dropScriptLinks(doc *goquery.Document) {
-	doc.Find("a[href]").Each(func(_ int, s *goquery.Selection) {
-		href, _ := s.Attr("href")
-		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(href)), "javascript:") {
-			return
-		}
-		if contents := s.Contents(); contents.Length() > 0 {
-			s.ReplaceWithSelection(contents)
-		} else {
-			s.Remove()
+// dropScriptLinks strips the href of every javascript: link in sel (the
+// selected elements and their descendants), with Readability's exact test, so
+// the converter renders only the link text, as Readability does. The element
+// itself stays, so it runs after Selector matching without changing what
+// matched.
+func dropScriptLinks(sel *goquery.Selection) {
+	sel.Find("a[href]").AddSelection(sel.Filter("a[href]")).Each(func(_ int, s *goquery.Selection) {
+		if href, _ := s.Attr("href"); strings.HasPrefix(href, "javascript:") {
+			s.RemoveAttr("href")
 		}
 	})
 }

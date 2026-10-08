@@ -875,12 +875,22 @@ func TestFetch_MetaDeclaredISO2022JP(t *testing.T) {
 	if !strings.Contains(out, "日本") {
 		t.Fatalf("expected ISO-2022-JP to be decoded, got:\n%q", out)
 	}
+
+	// A wrong iso-2022-jp declaration on a real UTF-8 body keeps the UTF-8.
+	srv = serve(t, "text/html", []byte(`<html><head><meta charset="iso-2022-jp"></head><body><p>日本語</p></body></html>`))
+	out, err = Fetch(context.Background(), srv.URL+"/x", Options{Raw: true})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if !strings.Contains(out, "日本語") {
+		t.Fatalf("expected mislabelled UTF-8 to survive, got:\n%q", out)
+	}
 }
 
 func TestFetch_SelectorPathDropsJavascriptLinks(t *testing.T) {
 	allowLoopback(t)
 	page := `<!doctype html><html><body><div id="c">
-		<p><a href="javascript:void(0)">click me</a> and <a href=" JavaScript:go()"><b>bold</b> link</a></p>
+		<p><a href="javascript:void(0)">click me</a> and <a class="more" href="javascript:go()"><b>bold</b> link</a></p>
 		</div></body></html>`
 	srv := serve(t, "text/html; charset=utf-8", []byte(page))
 	for _, opts := range []Options{{Selector: "#c"}, {FullPage: true}} {
@@ -894,5 +904,14 @@ func TestFetch_SelectorPathDropsJavascriptLinks(t *testing.T) {
 		if !strings.Contains(out, "click me") || !strings.Contains(out, "**bold** link") {
 			t.Fatalf("%+v: link text lost:\n%s", opts, out)
 		}
+	}
+
+	// A selector that targets the javascript: link itself still matches it.
+	out, err := Fetch(context.Background(), srv.URL+"/x", Options{Selector: "a.more"})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if !strings.Contains(out, "**bold** link") || strings.Contains(out, "javascript:") {
+		t.Fatalf("selector on a javascript: link: got:\n%s", out)
 	}
 }
