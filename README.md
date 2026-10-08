@@ -27,9 +27,9 @@ and the truncation / error strings — but:
   after DNS resolution in the dialer. Upstream explicitly warns it *can* reach
   local/internal addresses; here it cannot.
   → [SSRF protection](#ssrf-protection-only-public-ips-are-reachable)
-- **PDF text extraction** (opt-in `ExtractPDF`). Upstream returns PDFs as
-  unusable raw bytes; webfetch can extract their text, still fully in-process.
-  → [Extension: `ExtractPDF`](#extension-extractpdf-off-by-default)
+- **PDF hand-off** (opt-in `PDFHandler`). Upstream returns PDFs as unusable raw
+  bytes; webfetch can hand the bytes to your own extractor and return its text.
+  → [Extension: `PDFHandler`](#extension-pdfhandler-off-by-default)
 - **Content metadata** (opt-in `IncludeMetadata`). Optional
   title/author/date/site/language frontmatter — not offered upstream.
   → [Extension: `IncludeMetadata`](#extension-includemetadata-off-by-default)
@@ -89,24 +89,30 @@ content), and the frontmatter counts as part of the returned content, so
 `StartIndex` / `MaxLength` page over it too. Left `false` (the default), output
 is byte-identical to upstream — see [Fidelity](#fidelity).
 
-### Extension: `ExtractPDF` (off by default)
+### Extension: `PDFHandler` (off by default)
 
 Upstream returns PDF responses as raw bytes behind a "cannot be simplified"
-note, which is unusable as LLM context. With `Options.ExtractPDF: true`, a PDF
-response (detected by content-type or the `%PDF-` magic bytes) is run through a
-pure-Go text extractor and the extracted text is returned like any other
-content — no subprocess, no sidecar. `Raw` takes precedence: if set, the PDF is
-returned unextracted. The [body cap](#body-cap-maxbodybytes-10-mib-by-default)
-applies to PDFs too; raise `MaxBodyBytes` for documents over 10 MiB. A PDF
-that cannot be parsed, or parses but yields no text (a scan without OCR),
-returns a `Failed to extract PDF` error, so a caller's fallback can take over.
-Left `false` (the default), the upstream raw-bytes behaviour is preserved.
+note, which is unusable as LLM context. webfetch does not parse PDFs itself;
+set `Options.PDFHandler` and a PDF response (detected by content-type or the
+`%PDF-` magic bytes) is handed to it as bytes, downloaded through the same SSRF
+guard. The text it returns is the content, paged by `StartIndex` / `MaxLength`
+like any other:
 
-> **Enable only for trusted sources.** The PDF parser has no resource limits:
-> a crafted PDF well under `MaxBodyBytes` can decompress or allocate gigabytes
-> and exhaust CPU or memory, and an out-of-memory crash takes the process down.
-> For model-chosen or otherwise untrusted URLs, leave `ExtractPDF` off and send
-> PDFs to an isolated fallback reader (e.g. a sandboxed headless browser).
+```go
+out, err := webfetch.Fetch(ctx, url, webfetch.Options{
+    PDFHandler: func(ctx context.Context, body []byte) (string, error) {
+        return tika.Extract(ctx, "fetched.pdf", "application/pdf", bytes.NewReader(body))
+    },
+})
+```
+
+The bytes are untrusted: run the parser where a malicious PDF cannot take your
+process down (e.g. a Tika sidecar). With a handler set, PDF responses use their
+own cap, `MaxPDFBytes` (default `webfetch.DefaultMaxPDFBytes`, 50 MiB; negative
+disables it) instead of `MaxBodyBytes`. A handler error, or empty text (a scan
+without OCR), returns a `Failed to extract PDF` error, so a caller's fallback
+can take over. `Raw` takes precedence. Nil (the default) keeps the upstream
+raw-bytes behaviour.
 
 ### Extension: full-page & selector escape hatch (off by default)
 

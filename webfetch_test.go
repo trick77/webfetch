@@ -108,34 +108,42 @@ func TestFetch_IncludeMetadata(t *testing.T) {
 	}
 }
 
-func TestFetch_ExtractPDF(t *testing.T) {
+func TestFetch_PDFHandler(t *testing.T) {
 	allowLoopback(t)
 	pdfBytes, err := os.ReadFile("testdata/sample.pdf")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/pdf")
-		w.Write(pdfBytes)
-	}))
-	defer srv.Close()
+	srv := serve(t, "application/pdf", pdfBytes)
+	var got []byte
+	handler := func(_ context.Context, body []byte) (string, error) {
+		got = body
+		return "EXTRACTED-TEXT", nil
+	}
 
-	// ExtractPDF=true -> the marker text embedded in the fixture is returned.
-	out, err := Fetch(context.Background(), srv.URL+"/doc.pdf", Options{ExtractPDF: true})
+	// With a handler, the PDF bytes go to it and its text is the content.
+	out, err := Fetch(context.Background(), srv.URL+"/doc.pdf", Options{PDFHandler: handler})
 	if err != nil {
 		t.Fatalf("Fetch error: %v", err)
 	}
-	if !strings.HasPrefix(out, fmt.Sprintf("Contents of %s/doc.pdf:\n", srv.URL)) {
-		t.Fatalf("missing wrapper prefix, got:\n%s", out)
+	if want := fmt.Sprintf("Contents of %s/doc.pdf:\nEXTRACTED-TEXT", srv.URL); out != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
 	}
-	if !strings.Contains(out, "ZEBRA-42") {
-		t.Fatalf("expected extracted PDF text, got:\n%s", out)
-	}
-	if strings.Contains(out, "cannot be simplified") {
-		t.Fatalf("extracted PDF should not carry the raw-content note, got:\n%s", out)
+	if !bytes.Equal(got, pdfBytes) {
+		t.Fatalf("handler got %d bytes, want the %d-byte body", len(got), len(pdfBytes))
 	}
 
-	// Default (ExtractPDF=false) -> upstream behaviour: raw bytes behind the note.
+	// Raw takes precedence: the handler is not called.
+	got = nil
+	raw, err := Fetch(context.Background(), srv.URL+"/doc.pdf", Options{Raw: true, PDFHandler: handler})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if got != nil || !strings.Contains(raw, "cannot be simplified") {
+		t.Fatalf("Raw must bypass the handler, got:\n%.200s", raw)
+	}
+
+	// Default (no handler) -> upstream behaviour: raw bytes behind the note.
 	plain, err := Fetch(context.Background(), srv.URL+"/doc.pdf", Options{})
 	if err != nil {
 		t.Fatalf("Fetch error: %v", err)
@@ -143,8 +151,19 @@ func TestFetch_ExtractPDF(t *testing.T) {
 	if !strings.Contains(plain, "Content type application/pdf cannot be simplified to markdown") {
 		t.Fatalf("default must keep the raw-content note for PDFs, got a different shape")
 	}
-	if strings.Contains(plain, "ZEBRA-42") {
-		t.Fatalf("default must not extract PDF text")
+}
+
+func TestFetch_PDFHandlerSniffsMagic(t *testing.T) {
+	allowLoopback(t)
+	srv := serve(t, "application/octet-stream", []byte("%PDF-1.4\nbody"))
+	out, err := Fetch(context.Background(), srv.URL, Options{
+		PDFHandler: func(context.Context, []byte) (string, error) { return "SNIFFED", nil },
+	})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if !strings.HasSuffix(out, "\nSNIFFED") {
+		t.Fatalf("a %%PDF- body must reach the handler, got:\n%s", out)
 	}
 }
 
@@ -463,58 +482,68 @@ func TestFetch_TruncatedBodyReportsReadFailure(t *testing.T) {
 	}
 }
 
-func TestFetch_CorruptPDFReportsExtractionFailure(t *testing.T) {
+func TestFetch_PDFHandlerError(t *testing.T) {
 	allowLoopback(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/pdf")
-		// A valid PDF magic number followed by garbage: isPDF accepts it, the
-		// extractor does not.
-		fmt.Fprint(w, "%PDF-1.4\nnot actually a pdf body")
-	}))
-	defer srv.Close()
-
-	_, err := Fetch(context.Background(), srv.URL, Options{ExtractPDF: true})
-	if err == nil {
-		t.Fatal("expected an error for an undecodable PDF")
-	}
-	if !strings.Contains(err.Error(), "Failed to extract PDF") {
-		t.Fatalf("unexpected error text: %v", err)
+	srv := serve(t, "application/pdf", []byte("%PDF-1.4\nbody"))
+	boom := errors.New("tika down")
+	_, err := Fetch(context.Background(), srv.URL, Options{
+		PDFHandler: func(context.Context, []byte) (string, error) { return "", boom },
+	})
+	if err == nil || !strings.Contains(err.Error(), "Failed to extract PDF") || !errors.Is(err, boom) {
+		t.Fatalf("want a wrapped Failed to extract PDF error, got: %v", err)
 	}
 }
 
-func TestFetch_TextlessPDFReportsExtractionFailure(t *testing.T) {
+func TestFetch_PDFHandlerEmptyText(t *testing.T) {
 	allowLoopback(t)
-	// A well-formed one-page PDF whose page has no text (like a scan without
-	// OCR): extraction yields nothing, which must surface as an error so a
+	// A scan without OCR yields no text; that must surface as an error so a
 	// caller's fallback runs.
-	objs := []string{
-		"<< /Type /Catalog /Pages 2 0 R >>",
-		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>",
-		"<< /Length 0 >>\nstream\n\nendstream",
+	srv := serve(t, "application/pdf", []byte("%PDF-1.4\nbody"))
+	_, err := Fetch(context.Background(), srv.URL, Options{
+		PDFHandler: func(context.Context, []byte) (string, error) { return " \n ", nil },
+	})
+	if err == nil || !strings.Contains(err.Error(), "no extractable text") {
+		t.Fatalf("want a no extractable text error, got: %v", err)
 	}
-	var b bytes.Buffer
-	b.WriteString("%PDF-1.4\n")
-	offsets := make([]int, len(objs))
-	for i, o := range objs {
-		offsets[i] = b.Len()
-		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", i+1, o)
-	}
-	xref := b.Len()
-	fmt.Fprintf(&b, "xref\n0 %d\n0000000000 65535 f \n", len(objs)+1)
-	for _, off := range offsets {
-		fmt.Fprintf(&b, "%010d 00000 n \n", off)
-	}
-	fmt.Fprintf(&b, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objs)+1, xref)
-	srv := serve(t, "application/pdf", b.Bytes())
+}
 
-	_, err := Fetch(context.Background(), srv.URL, Options{ExtractPDF: true})
-	if err == nil {
-		t.Fatal("expected an error for a PDF without text")
+func TestFetch_PDFCap(t *testing.T) {
+	allowLoopback(t)
+	handler := func(context.Context, []byte) (string, error) { return "ok", nil }
+
+	// A PDF over the 10 MiB body cap passes with a handler (50 MiB PDF cap)...
+	big := append([]byte("%PDF-1.4\n"), make([]byte, DefaultMaxBodyBytes+1)...)
+	srv := serve(t, "application/pdf", big)
+	if _, err := Fetch(context.Background(), srv.URL, Options{PDFHandler: handler}); err != nil {
+		t.Fatalf("PDF under the PDF cap must pass, got: %v", err)
 	}
-	// The specific reason proves the PDF parsed and the empty-text check fired.
-	if !strings.Contains(err.Error(), "Failed to extract PDF") || !strings.Contains(err.Error(), "no extractable text") {
-		t.Fatalf("unexpected error text: %v", err)
+	// ...but not without one: the body cap still applies.
+	if _, err := Fetch(context.Background(), srv.URL, Options{}); err == nil {
+		t.Fatal("without a handler the body cap must apply")
+	}
+
+	// Over the PDF cap fails, whether announced by Content-Length or streamed.
+	small := Options{PDFHandler: handler, MaxPDFBytes: 100}
+	body := append([]byte("%PDF-1.4\n"), make([]byte, 200)...)
+	if _, err := Fetch(context.Background(), serve(t, "application/pdf", body).URL, small); err == nil ||
+		!strings.Contains(err.Error(), "exceeds 100 bytes") {
+		t.Fatalf("Content-Length over the PDF cap must fail, got: %v", err)
+	}
+	streamed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		w.(http.Flusher).Flush() // no Content-Length: chunked
+		_, _ = w.Write(body)
+	}))
+	defer streamed.Close()
+	if _, err := Fetch(context.Background(), streamed.URL, small); err == nil ||
+		!strings.Contains(err.Error(), "exceeds 100 bytes") {
+		t.Fatalf("a streamed body over the PDF cap must fail, got: %v", err)
+	}
+
+	// HTML keeps the body cap even with a handler set.
+	html := []byte("<html><body>" + strings.Repeat("x", 200) + "</body></html>")
+	if _, err := Fetch(context.Background(), serve(t, "text/html", html).URL, Options{PDFHandler: handler, MaxBodyBytes: 100}); err == nil {
+		t.Fatal("HTML must keep MaxBodyBytes when a PDF handler is set")
 	}
 }
 

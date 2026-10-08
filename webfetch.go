@@ -20,7 +20,7 @@
 // package.
 //
 // Beyond upstream, Options offers opt-in extensions (IncludeMetadata,
-// ExtractPDF, FullPage / Selector / ExcludeSelectors) that default to off, and
+// PDFHandler, FullPage / Selector / ExcludeSelectors) that default to off, and
 // one deliberate default: MaxBodyBytes caps response bodies at 10 MiB so a
 // model-chosen URL cannot exhaust memory. Only bodies over the cap behave
 // differently from upstream (they fail instead of being read whole).
@@ -43,7 +43,6 @@ import (
 	readability "codeberg.org/readeck/go-readability/v2"
 	md "github.com/JohannesKaufmann/html-to-markdown"
 	"github.com/PuerkitoBio/goquery"
-	"github.com/ledongthuc/pdf"
 	"golang.org/x/net/html/charset"
 )
 
@@ -60,6 +59,10 @@ const defaultMaxLength = 5000
 // is zero. Upstream reads bodies unbounded; the cap is a deliberate divergence
 // that only affects bodies larger than this.
 const DefaultMaxBodyBytes = 10 << 20
+
+// DefaultMaxPDFBytes is the body cap for PDF responses handed to
+// Options.PDFHandler when Options.MaxPDFBytes is zero.
+const DefaultMaxPDFBytes = 50 << 20
 
 // fetchTimeout mirrors upstream's httpx timeout=30.
 const fetchTimeout = 30 * time.Second
@@ -102,21 +105,20 @@ type Options struct {
 	// MaxLength page over it too; hold IncludeMetadata constant across paged
 	// calls so a page-2 StartIndex stays aligned.
 	IncludeMetadata bool
-	// ExtractPDF, when true, extracts the text of PDF responses (detected by
-	// content-type or the "%PDF-" magic bytes) instead of returning the raw
-	// bytes behind the "cannot be simplified" note. Extraction is pure-Go (no
-	// subprocess). Raw takes precedence: if Raw is set, the PDF is returned
-	// unextracted. Default false, preserving the upstream raw-bytes behaviour.
-	// MaxBodyBytes applies to PDFs too; raise it for documents over 10 MiB.
-	// A PDF that parses but yields no text (e.g. a scan without OCR) is
-	// reported as an error, like an unparsable one.
-	//
-	// Enable only for trusted sources. The parser has no resource limits: a
-	// crafted PDF well under MaxBodyBytes can decompress or allocate gigabytes
-	// and exhaust CPU or memory (a fatal out-of-memory that recover cannot
-	// catch). For untrusted URLs, leave this off and send PDFs to an isolated
-	// fallback reader.
-	ExtractPDF bool
+	// PDFHandler, when set, receives the body of a PDF response (detected by
+	// content-type or the "%PDF-" magic bytes) and returns its text, which is
+	// then returned like any other content instead of the raw bytes behind the
+	// "cannot be simplified" note. webfetch does not parse PDFs itself: the bytes
+	// are untrusted, so run the parser somewhere a malformed or malicious PDF
+	// cannot take the caller down (e.g. a Tika sidecar). A handler error, or
+	// text that is empty after trimming (e.g. a scan without OCR), fails the
+	// fetch with a "Failed to extract PDF" error. Raw takes precedence. Nil (the
+	// default) keeps the upstream raw-bytes behaviour.
+	PDFHandler func(ctx context.Context, body []byte) (string, error)
+	// MaxPDFBytes replaces MaxBodyBytes for responses served with a PDF
+	// content-type while PDFHandler is set. Zero applies DefaultMaxPDFBytes
+	// (50 MiB); a negative value disables the cap.
+	MaxPDFBytes int64
 	// FullPage converts the entire page to Markdown, skipping the Readability
 	// main-content extraction. Use it when Readability over-strips (docs pages,
 	// tables, sidebars you actually want). Ignored when Selector is set, and when
@@ -143,8 +145,8 @@ type Options struct {
 // to public IPs by the SSRF guard in the dialer.
 //
 // It returns a non-nil error on connection failure, HTTP status >= 400, a
-// response body over MaxBodyBytes, or (with ExtractPDF) a PDF that cannot be
-// parsed or yields no text. Callers that have an alternate reader (e.g.
+// response body over MaxBodyBytes (or MaxPDFBytes), or (with PDFHandler) a PDF
+// the handler fails on or that yields no text. Callers that have an alternate reader (e.g.
 // a headless-browser fallback) should treat a non-nil error as "try the
 // fallback".
 func Fetch(ctx context.Context, rawURL string, opts Options) (string, error) {
@@ -172,8 +174,8 @@ func Fetch(ctx context.Context, rawURL string, opts Options) (string, error) {
 }
 
 // withDefaults resolves the zero-value defaults: the autonomous User-Agent,
-// the upstream MaxLength, a non-negative StartIndex, and DefaultMaxBodyBytes.
-// A negative MaxBodyBytes stays negative and means unlimited.
+// the upstream MaxLength, a non-negative StartIndex, DefaultMaxBodyBytes and
+// DefaultMaxPDFBytes. A negative cap stays negative and means unlimited.
 func (o Options) withDefaults() Options {
 	if o.UserAgent == "" {
 		o.UserAgent = DefaultUserAgentAutonomous
@@ -186,6 +188,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.MaxBodyBytes == 0 {
 		o.MaxBodyBytes = DefaultMaxBodyBytes
+	}
+	if o.MaxPDFBytes == 0 {
+		o.MaxPDFBytes = DefaultMaxPDFBytes
 	}
 	return o
 }
@@ -214,23 +219,31 @@ func fetchURL(ctx context.Context, rawURL string, opts Options) (content, prefix
 		return "", "", fmt.Errorf("Failed to fetch %s - status code %d", rawURL, resp.StatusCode) //nolint:staticcheck // ST1005: upstream contract
 	}
 
-	if opts.MaxBodyBytes > 0 && resp.ContentLength > opts.MaxBodyBytes {
-		return "", "", fetchErr(rawURL, errBodyTooLarge(opts.MaxBodyBytes))
+	contentType := resp.Header.Get("content-type")
+	handlePDF := opts.PDFHandler != nil && !opts.Raw
+	limit := opts.MaxBodyBytes
+	if handlePDF && isPDFContentType(contentType) {
+		limit = opts.MaxPDFBytes
 	}
-	bodyBytes, err := readBody(resp.Body, opts.MaxBodyBytes)
+	if limit > 0 && resp.ContentLength > limit {
+		return "", "", fetchErr(rawURL, errBodyTooLarge(limit))
+	}
+	bodyBytes, err := readBody(resp.Body, limit)
 	if err != nil {
 		return "", "", fetchErr(rawURL, err)
 	}
-	contentType := resp.Header.Get("content-type")
 
 	// PDF handling runs on the raw bytes, before charset decoding (which would
 	// corrupt binary content). Raw takes precedence, matching the option's doc.
-	if opts.ExtractPDF && !opts.Raw && isPDF(contentType, bodyBytes) {
-		text, pdfErr := extractPDFText(bodyBytes)
+	if handlePDF && isPDF(contentType, bodyBytes) {
+		text, pdfErr := opts.PDFHandler(ctx, bodyBytes)
+		if pdfErr == nil && strings.TrimSpace(text) == "" {
+			pdfErr = errors.New("no extractable text")
+		}
 		if pdfErr != nil {
 			return "", "", fmt.Errorf("Failed to extract PDF %s: %w", rawURL, pdfErr) //nolint:staticcheck // ST1005: matches the upstream-style messages
 		}
-		return text, "", nil
+		return strings.ToValidUTF8(strings.TrimSpace(text), "�"), "", nil
 	}
 
 	pageRaw, err := decodeBody(bodyBytes, contentType)
@@ -545,41 +558,14 @@ func yamlQuote(s string) string {
 // isPDF reports whether the response is a PDF, by content-type or the "%PDF-"
 // magic bytes (which also catches PDFs served as application/octet-stream).
 func isPDF(contentType string, body []byte) bool {
-	if strings.Contains(contentType, "application/pdf") ||
-		strings.Contains(contentType, "application/x-pdf") {
-		return true
-	}
-	return bytes.HasPrefix(body, []byte("%PDF-"))
+	return isPDFContentType(contentType) || bytes.HasPrefix(body, []byte("%PDF-"))
 }
 
-// extractPDFText extracts the plain text of a PDF using a pure-Go parser. The
-// parser can panic on malformed input, so a recover converts that into an error
-// (callers with a headless-browser fallback treat a non-nil error as "try the
-// fallback").
-func extractPDFText(body []byte) (text string, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("pdf parse panicked: %v", r)
-		}
-	}()
-	reader, err := pdf.NewReader(bytes.NewReader(body), int64(len(body)))
-	if err != nil {
-		return "", err
-	}
-	plain, err := reader.GetPlainText()
-	if err != nil {
-		return "", err
-	}
-	var sb strings.Builder
-	if _, err := io.Copy(&sb, plain); err != nil {
-		return "", err
-	}
-	text = strings.TrimSpace(sb.String())
-	if text == "" {
-		// Typically a scan without a text layer; a fallback reader may do better.
-		return "", errors.New("no extractable text")
-	}
-	return strings.ToValidUTF8(text, "\uFFFD"), nil
+// isPDFContentType reports whether the content-type names a PDF; it is known
+// before the body is read, so it selects the MaxPDFBytes cap.
+func isPDFContentType(contentType string) bool {
+	return strings.Contains(contentType, "application/pdf") ||
+		strings.Contains(contentType, "application/x-pdf")
 }
 
 var (
