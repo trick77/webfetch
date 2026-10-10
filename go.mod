@@ -3,7 +3,7 @@ module github.com/trick77/webfetch
 go 1.26.0
 
 require (
-	codeberg.org/readeck/go-readability/v2 v2.1.2
+	codeberg.org/readeck/go-readability/v2 v2.1.3
 	github.com/JohannesKaufmann/html-to-markdown v1.6.0
 	github.com/PuerkitoBio/goquery v1.13.0
 	golang.org/x/net v0.59.0
