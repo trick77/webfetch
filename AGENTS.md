@@ -18,19 +18,19 @@ the parser. Don't add an in-process PDF parser back (a bomb can't be bounded,
 
 ## Commands
 
-Run all of these before declaring a change done (they mirror CI, in order):
+The gate is [ship](https://github.com/trick77/ship), configured in `ship.yaml`:
+gofmt, build, golangci-lint (`.golangci.yaml`), `go test -race`, a 75% line
+floor and 75% on changed lines. New code needs tests that exercise it, not just
+green ones. Run it before declaring a change done:
 
 ```
-gofmt -l .          # must print nothing
-go vet ./...
-go build ./...
-go test -race ./...
-golangci-lint run ./...   # config: .golangci.yaml
+ship() { go run "github.com/trick77/ship@$(git ls-remote https://github.com/trick77/ship refs/heads/master | cut -f1)" "$@"; }
+ship hooks   # once per clone: the pre-push hook runs ship check on every push
+ship check
 ```
 
-CI also gates coverage: 75% line floor (`scripts/coverage-gate.sh`) and 75% on
-lines the PR adds or changes (`scripts/patch-coverage.sh`). New code needs
-tests that exercise it, not just green ones.
+CI and release run by hand only: `gh workflow run CI --ref <branch>`,
+`gh workflow run Release -f bump=patch` (v-prefixed tag, GitHub release).
 
 The Go version follows the `go` directive in `go.mod`. There is no Makefile.
 
