@@ -18,18 +18,12 @@ the parser. Don't add an in-process PDF parser back (a bomb can't be bounded,
 
 ## Commands
 
-The gate is [ship](https://github.com/trick77/ship), configured in `ship.yaml`:
+Gate: `ship check` ([ship](https://github.com/trick77/ship), `ship.yaml`; `ship` is the `ship()` from ship's README). `ship hooks` once per clone: pre-push runs it.
 gofmt, build, golangci-lint (`.golangci.yaml`), `go test -race`, a 75% line
 floor and 75% on changed lines. New code needs tests that exercise it, not just
-green ones. Run it before declaring a change done:
+green ones. Run it before declaring a change done.
 
-```
-ship() { go run "github.com/trick77/ship@$(git ls-remote https://github.com/trick77/ship refs/heads/master | cut -f1)" "$@"; }
-ship hooks   # once per clone: the pre-push hook runs ship check on every push
-ship check
-```
-
-CI and release run by hand only: `gh workflow run CI --ref <branch>`,
+CI runs on every pull request (by hand: `gh workflow run CI --ref <branch>`); release by hand only:
 `gh workflow run Release -f bump=patch` (v-prefixed tag, GitHub release).
 
 The Go version follows the `go` directive in `go.mod`. There is no Makefile.
@@ -75,6 +69,6 @@ repurpose or export it.
 - Default branch is `master`. Never push to `master` — always branch + PR.
 - Commit subjects + PR titles: Go style `area: what` (`ssrf: …`, `markdown: …`), gated by ship; release
   notes list them by area.
-- A merge ships nothing: CI and release run by hand only (see Commands).
+- A merge ships nothing: release by hand only (see Commands).
 - Dependabot opens one grouped dependency PR per week: `ship check` on its branch, then merge.
 - All workflow and config files use the `.yaml` extension (never `.yml`).
