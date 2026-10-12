@@ -70,5 +70,5 @@ repurpose or export it.
 - Commit subjects + PR titles: Go style `area: what` (`ssrf: …`, `markdown: …`), gated by ship; release
   notes list them by area.
 - A merge ships nothing: release by hand only (see Commands).
-- Dependabot opens one grouped dependency PR per week: `ship check` on its branch, then merge.
+- Dependabot opens grouped dependency PRs weekly (non-major, major apart): CI gates them, then merge.
 - All workflow and config files use the `.yaml` extension (never `.yml`).
