@@ -19,7 +19,7 @@ the parser. Don't add an in-process PDF parser back (a bomb can't be bounded,
 ## Commands
 
 Gate: `ship check` ([ship](https://github.com/trick77/ship), `ship.yaml`; `ship` is the `ship()` from ship's README). `ship hooks` once per clone: pre-push runs it.
-gofmt, build, golangci-lint (`.golangci.yaml`), `go test -race`, a 75% line
+gofmt, build, golangci-lint (ship's config, no repo copy), `go test -race`, a 75% line
 floor and 75% on changed lines. New code needs tests that exercise it, not just
 green ones. Run it before declaring a change done.
 
