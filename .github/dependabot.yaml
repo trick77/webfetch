@@ -1,22 +1,45 @@
 version: 2
 updates:
-  # Go module
   - package-ecosystem: gomod
     directory: /
     commit-message: { prefix: deps }   # Go style: "deps: bump …"
     schedule:
       interval: weekly
+      day: sunday
+      time: "07:00"
+      timezone: Europe/Zurich
+    open-pull-requests-limit: 5
     groups:
-      go-minor-and-patch:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
+      gomod-non-major:
+        patterns:
+          - "*"
+        update-types:
+          - patch
+          - minor
+      gomod-major:
+        patterns:
+          - "*"
+        update-types:
+          - major
 
-  # GitHub Actions
   - package-ecosystem: github-actions
     directory: /
     commit-message: { prefix: deps }   # Go style: "deps: bump …"
     schedule:
       interval: weekly
+      day: sunday
+      time: "07:00"
+      timezone: Europe/Zurich
+    open-pull-requests-limit: 5
     groups:
-      actions:
-        patterns: ["*"]
+      actions-non-major:
+        patterns:
+          - "*"
+        update-types:
+          - patch
+          - minor
+      actions-major:
+        patterns:
+          - "*"
+        update-types:
+          - major

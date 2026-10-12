@@ -19,7 +19,7 @@ the parser. Don't add an in-process PDF parser back (a bomb can't be bounded,
 ## Commands
 
 Gate: `ship check` ([ship](https://github.com/trick77/ship), `ship.yaml`; `ship` is the `ship()` from ship's README). `ship hooks` once per clone: pre-push runs it.
-gofmt, build, golangci-lint (`.golangci.yaml`), `go test -race`, a 75% line
+gofmt, build, golangci-lint (ship's config, no repo copy), `go test -race`, a 75% line
 floor and 75% on changed lines. New code needs tests that exercise it, not just
 green ones. Run it before declaring a change done.
 
@@ -70,5 +70,5 @@ repurpose or export it.
 - Commit subjects + PR titles: Go style `area: what` (`ssrf: …`, `markdown: …`), gated by ship; release
   notes list them by area.
 - A merge ships nothing: release by hand only (see Commands).
-- Dependabot opens one grouped dependency PR per week: `ship check` on its branch, then merge.
+- Dependabot opens grouped dependency PRs weekly (non-major, major apart): CI gates them, then merge.
 - All workflow and config files use the `.yaml` extension (never `.yml`).
