@@ -3,6 +3,7 @@ updates:
   # Go module
   - package-ecosystem: gomod
     directory: /
+    commit-message: { prefix: deps }   # Go style: "deps: bump …"
     schedule:
       interval: weekly
     groups:
@@ -13,6 +14,7 @@ updates:
   # GitHub Actions
   - package-ecosystem: github-actions
     directory: /
+    commit-message: { prefix: deps }   # Go style: "deps: bump …"
     schedule:
       interval: weekly
     groups:

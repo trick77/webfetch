@@ -73,6 +73,8 @@ repurpose or export it.
 ## Git & CI
 
 - Default branch is `master`. Never push to `master` — always branch + PR.
+- Commit subjects + PR titles: Go style `area: what` (`ssrf: …`, `markdown: …`), gated by ship; release
+  notes list them by area.
 - CI tests run on branches/PRs only, never on the master push.
 - Merging to `master` (touching `**.go` / `go.mod` / `go.sum`) auto-mints a
   semver tag via the release workflow — a merge is a release.
