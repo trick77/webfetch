@@ -290,8 +290,8 @@ func checkRedirect(_ *http.Request, via []*http.Request) error {
 // fetchErr wraps err as upstream's "Failed to fetch <url>: <err>". The
 // capitalized prefix is upstream's, reproduced verbatim as part of this
 // package's observable contract (err itself may be this package's own, e.g.
-// the body cap); ST1005 is suppressed per site rather than in .golangci.yaml,
-// which stays identical across the repo family.
+// the body cap); ST1005 is suppressed per site rather than in the lint
+// config, which ship embeds identically across the repo family.
 func fetchErr(rawURL string, err error) error {
 	return fmt.Errorf("Failed to fetch %s: %w", rawURL, err) //nolint:staticcheck // ST1005: upstream contract
 }
