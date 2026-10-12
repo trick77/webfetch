@@ -73,8 +73,8 @@ repurpose or export it.
 ## Git & CI
 
 - Default branch is `master`. Never push to `master` — always branch + PR.
-- CI tests run on branches/PRs only, never on the master push.
-- Merging to `master` (touching `**.go` / `go.mod` / `go.sum`) auto-mints a
-  semver tag via the release workflow — a merge is a release.
-- Dependabot opens one grouped dependency PR per week; merge it manually after CI passes.
+- Commit subjects + PR titles: Go style `area: what` (`ssrf: …`, `markdown: …`), gated by ship; release
+  notes list them by area.
+- A merge ships nothing: CI and release run by hand only (see Commands).
+- Dependabot opens one grouped dependency PR per week: `ship check` on its branch, then merge.
 - All workflow and config files use the `.yaml` extension (never `.yml`).
