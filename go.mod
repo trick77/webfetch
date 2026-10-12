@@ -1,6 +1,6 @@
 module github.com/trick77/webfetch
 
-go 1.27.0
+go 1.27.2
 
 require (
 	codeberg.org/readeck/go-readability/v2 v2.1.3
