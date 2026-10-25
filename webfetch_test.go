@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/trick77/webfetch/internal/readability"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -842,19 +843,48 @@ func TestExtract_SelectorFullPageNormalized(t *testing.T) {
 
 func TestExtract_SelectorNormalized(t *testing.T) {
 	// The tree is normalized, so the selector is too: NFD / soft-hyphen text
-	// in it still matches.
-	page := `<!doctype html><html><body>
-		<p title="cafe` + "\u0301" + `">NFDMATCH</p>
-		<p>SHYMATCH Co` + "\u00ad" + `op</p>
-		<p>OTHER</p>
-		</body></html>`
-	for sel, want := range map[string]string{
+	// in it still matches, whether the page has the literal characters
+	// (normalized in the tree) or references (left as is by the parser).
+	pages := map[string][2]string{
+		"literal":   {"cafe\u0301", "Co\u00adop"},
+		"reference": {"cafe&#x301;", "Co&shy;op"},
+	}
+	sels := map[string]string{
 		`p[title="cafe` + "\u0301" + `"]`:    "NFDMATCH",
 		`p:contains("Co` + "\u00ad" + `op")`: "SHYMATCH",
+	}
+	for name, p := range pages {
+		page := `<!doctype html><html><body>
+			<p title="` + p[0] + `">NFDMATCH</p>
+			<p>SHYMATCH ` + p[1] + `</p>
+			<p>OTHER</p>
+			</body></html>`
+		for sel, want := range sels {
+			out := extractContentFromHTML(page, nil, Options{Selector: sel})
+			if !strings.Contains(out, want) || strings.Contains(out, "OTHER") {
+				t.Errorf("%s: Selector %q: unexpected result:\n%s", name, sel, out)
+			}
+			out = extractContentFromHTML(page, nil, Options{FullPage: true, ExcludeSelectors: []string{sel}})
+			if strings.Contains(out, want) || !strings.Contains(out, "OTHER") {
+				t.Errorf("%s: ExcludeSelectors %q: unexpected result:\n%s", name, sel, out)
+			}
+		}
+	}
+}
+
+func TestNormalizeText(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                      "",
+		"plain caf\u00e9":       "plain caf\u00e9",
+		"cafe\u0301 co\u00adop": "caf\u00e9 coop",
+		"\u00ad":                "",
+		"\u00e9\u0301 co\u00ad": "\u00e9\u0301 co",
 	} {
-		out := extractContentFromHTML(page, nil, Options{Selector: sel})
-		if !strings.Contains(out, want) || strings.Contains(out, "OTHER") {
-			t.Errorf("selector %q: unexpected result:\n%s", sel, out)
+		if got := normalizeText(in); got != want {
+			t.Errorf("normalizeText(%q) = %q, want %q", in, got, want)
+		}
+		if got, err := io.ReadAll(readability.NormalizeText(strings.NewReader(in))); err != nil || string(got) != want {
+			t.Errorf("NormalizeText(%q) = %q, %v; normalizeText disagrees", in, got, err)
 		}
 	}
 }

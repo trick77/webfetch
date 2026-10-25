@@ -46,6 +46,7 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"github.com/trick77/webfetch/internal/readability"
 	"golang.org/x/net/html/charset"
+	"golang.org/x/text/unicode/norm"
 )
 
 // DefaultUserAgentAutonomous is the User-Agent sent for autonomous (tool-driven)
@@ -394,21 +395,22 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 	// none are set this block is skipped entirely and the output is byte-identical
 	// to upstream.
 	if len(opts.ExcludeSelectors) > 0 || opts.Selector != "" || opts.FullPage {
+		skipReadability := opts.Selector != "" || opts.FullPage
 		// Readability's Parse normalizes the text (NFC, soft hyphens removed)
 		// before parsing; every opt-in mode does the same, so a page reads the
 		// same whichever mode extracts it.
-		doc, perr := goquery.NewDocumentFromReader(readability.NormalizeText(strings.NewReader(page)))
+		doc, perr := goquery.NewDocumentFromReader(strings.NewReader(normalizeText(page)))
 		if perr != nil {
 			return errSimplify
 		}
 		for _, sel := range opts.ExcludeSelectors {
 			if sel = strings.TrimSpace(sel); sel != "" {
-				// Normalize the selector like the tree, or NFD / soft-hyphen
-				// text in it would no longer match.
-				doc.Find(normalizeSelector(sel)).Remove()
+				for _, q := range selectorForms(sel) {
+					doc.Find(q).Remove()
+				}
 			}
 		}
-		if opts.Selector != "" || opts.FullPage {
+		if skipReadability {
 			// Readability absolutizes links and drops javascript: links
 			// itself; do the same here so both paths agree (the latter in
 			// selectorMarkdown, after matching).
@@ -441,13 +443,31 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 	return markdown
 }
 
-// normalizeSelector applies readability.NormalizeText to a selector string.
-func normalizeSelector(sel string) string {
-	b, err := io.ReadAll(readability.NormalizeText(strings.NewReader(sel)))
+// normalizeText applies readability.NormalizeText to s. Text that is already
+// NFC and has no soft hyphen (almost every page) is returned as is, which is
+// what the transform would produce, without the copy.
+func normalizeText(s string) string {
+	if norm.NFC.IsNormalString(s) && !strings.ContainsRune(s, 0xAD) {
+		return s
+	}
+	b, err := io.ReadAll(readability.NormalizeText(strings.NewReader(s)))
 	if err != nil {
-		return sel
+		return s
 	}
 	return string(b)
+}
+
+// selectorForms returns the selectors to try for sel against a tree built
+// from normalizeText'd HTML: sel normalized the same way, so NFD / soft-hyphen
+// text in it still matches literal text, then sel itself when that differs.
+// The page was normalized as raw bytes, so text written as a reference
+// (&shy;, &#x301;) is decoded only by the parser and stays unnormalized in
+// the tree; the original selector still matches that.
+func selectorForms(sel string) []string {
+	if n := normalizeText(sel); n != sel {
+		return []string{n, sel}
+	}
+	return []string{sel}
 }
 
 // selectorMarkdown converts a subtree (Selector) or the whole body (FullPage) of
@@ -456,10 +476,17 @@ func normalizeSelector(sel string) string {
 func selectorMarkdown(doc *goquery.Document, opts Options) string {
 	var fragment string
 	if opts.Selector != "" {
-		// The tree is normalized (see extractContentFromHTML); normalize the
-		// selector too, or NFD / soft-hyphen text in it would no longer match.
-		q := normalizeSelector(opts.Selector)
-		sel := doc.Find(q)
+		// The first selector form that matches wins (see selectorForms); a
+		// union would not keep document order.
+		var (
+			q   string
+			sel *goquery.Selection
+		)
+		for _, q = range selectorForms(opts.Selector) {
+			if sel = doc.Find(q); sel.Length() > 0 {
+				break
+			}
+		}
 		// A match nested inside another match is already part of the outer
 		// one's HTML; keep only the outermost so nothing is emitted twice.
 		sel = sel.NotSelection(sel.Find(q))
