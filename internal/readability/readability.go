@@ -12,7 +12,8 @@
 // (parser.go, re2go/) is unchanged. Differences from upstream:
 //   - Parse no longer guesses the charset (gogs/chardet): its input must be
 //     UTF-8, which webfetch's decodeBody guarantees. The NFC normalization
-//     and soft-hyphen removal upstream applied while parsing are kept.
+//     and soft-hyphen removal upstream applied while parsing are kept, and
+//     exported as NormalizeText for callers of ParseAndMutate.
 //   - PublishedTime parses with a fixed set of time layouts instead of
 //     itlightning/dateparse; see parseTime.
 //   - The go-shiori/dom helpers live in ./dom.
@@ -34,4 +35,11 @@ import (
 func FromReader(input io.Reader, pageURL *nurl.URL) (Article, error) {
 	parser := NewParser()
 	return parser.Parse(input, pageURL)
+}
+
+// NormalizeText applies the text normalization Parse runs before parsing
+// (NFC, soft hyphens removed), for callers that build the tree themselves
+// and hand it to ParseAndMutate.
+func NormalizeText(r io.Reader) io.Reader {
+	return normalizeTextEncoding(r)
 }

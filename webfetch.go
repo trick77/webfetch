@@ -394,7 +394,15 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 	// none are set this block is skipped entirely and the output is byte-identical
 	// to upstream.
 	if len(opts.ExcludeSelectors) > 0 || opts.Selector != "" || opts.FullPage {
-		doc, perr := goquery.NewDocumentFromReader(strings.NewReader(page))
+		viaReadability := opts.Selector == "" && !opts.FullPage
+		var src io.Reader = strings.NewReader(page)
+		if viaReadability {
+			// Readability's Parse normalizes the text (NFC, soft hyphens
+			// removed) before parsing; do the same so this path agrees with
+			// the default one.
+			src = readability.NormalizeText(src)
+		}
+		doc, perr := goquery.NewDocumentFromReader(src)
 		if perr != nil {
 			return errSimplify
 		}
@@ -403,7 +411,7 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 				doc.Find(sel).Remove()
 			}
 		}
-		if opts.Selector != "" || opts.FullPage {
+		if !viaReadability {
 			// Readability absolutizes links and drops javascript: links
 			// itself; do the same here so both paths agree (the latter in
 			// selectorMarkdown, after matching).
