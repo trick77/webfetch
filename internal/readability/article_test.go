@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	_ "time/tzdata" // TestParseTimeHostZone loads zones on hosts without zoneinfo
 )
 
 // Expected values are what dateparse.ParseAny (the parser this replaced)
@@ -65,6 +66,11 @@ var timeCases = []struct{ in, want string }{
 	{"02 Jan 2006", "2006-01-02T00:00:00Z"},
 	{"2 Jan 2006", "2006-01-02T00:00:00Z"},
 	{"2006/01/02", "2006-01-02T00:00:00Z"},
+	{"2024/06/25 10:00:00", "2024-06-25T10:00:00Z"},
+	{"2024/06/25 10:00", "2024-06-25T10:00:00Z"},
+	{"Tue, 25 Jun 2024 10:00:00 +0000 (UTC)", "2024-06-25T10:00:00Z"},
+	{"Tue, 25 Jun 2024 10:00:00 +0200 (CEST)", "2024-06-25T10:00:00+02:00"},
+	{"Tuesday, 25-Jun-2024 10:00:00 GMT-11", "2024-06-25T10:00:00-11:00"},
 	{"  2024-06-25  ", "2024-06-25T00:00:00Z"},
 	{"2006-01", "2006-01-01T00:00:00Z"},
 	{"20060102", "2006-01-02T00:00:00Z"},
@@ -72,8 +78,15 @@ var timeCases = []struct{ in, want string }{
 	{"13:39", ""},
 	{"", ""},
 	{"2006-01-02T15:04:05+00:00Z", ""},
-	// Only a JavaScript "GMT±hhmm (zone)" suffix is cut, not any parenthetical.
+	// A "(zone)" comment is cut only after GMT or a numeric offset, not after
+	// any value.
 	{"2024-06-25 (Tuesday)", ""},
+	{"2024-06-25 10:00 (CEST)", ""},
+	// dateparse rejected these GMT±h zones; they read with the offset they
+	// name (time.Parse alone leaves the instant at UTC).
+	{"Tue, 25 Jun 2024 10:00:00 GMT+2", "2024-06-25T10:00:00+02:00"},
+	{"Tue Jun 25 10:00:00 GMT+2 2024", "2024-06-25T10:00:00+02:00"},
+	{"2024-06-25 10:00:00 +0200 GMT+2", "2024-06-25T10:00:00+02:00"},
 	// dateparse accepted these; dropped as rare or ambiguous (day/month
 	// order), so they now read as no published time.
 	{"02.01.2006", ""},
@@ -94,7 +107,7 @@ func TestParseTimeHostZone(t *testing.T) {
 	for _, name := range []string{"America/Denver", "America/Los_Angeles", "Europe/Zurich", "Asia/Kolkata"} {
 		loc, err := time.LoadLocation(name)
 		if err != nil {
-			t.Skipf("no tzdata for %s: %v", name, err)
+			t.Fatalf("load %s: %v", name, err)
 		}
 		time.Local = loc
 		for _, c := range timeCases {

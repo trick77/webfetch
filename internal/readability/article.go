@@ -99,6 +99,8 @@ var timeLayouts = []string{
 	"2006-01-02 15:04:05",
 	"2006-01-02 15:04",
 	"2006-01-02",
+	"2006/01/02 15:04:05",
+	"2006/01/02 15:04",
 	"2006/01/02",
 	"2006-01",
 	"20060102",
@@ -134,10 +136,12 @@ var timeLayouts = []string{
 // shapes; a value matching no layout is an error, as an unparsable one was
 // before. Results never depend on the host's zone: Unix values are UTC, and a
 // zone abbreviation without a numeric offset (other than UTC/GMT) reads as
-// offset zero instead of resolving against time.Local.
+// offset zero instead of resolving against time.Local; a "GMT+2" zone reads
+// as +02:00. A trailing " (zone)" comment is cut after "GMT" or a numeric
+// offset.
 func parseTime(s string) (time.Time, error) {
 	s = strings.TrimSpace(s)
-	if i := strings.Index(s, " ("); i > 0 && strings.HasSuffix(s, ")") && strings.Contains(s[:i], "GMT") {
+	if i := strings.Index(s, " ("); i > 0 && strings.HasSuffix(s, ")") && (strings.Contains(s[:i], "GMT") || endsWithOffset(s[:i])) {
 		s = s[:i]
 	}
 	if n, err := strconv.ParseInt(s, 10, 64); err == nil && s[0] != '-' && s[0] != '+' {
@@ -153,9 +157,31 @@ func parseTime(s string) (time.Time, error) {
 		}
 	}
 	for _, layout := range timeLayouts {
-		if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil {
-			return t, nil
+		t, err := time.ParseInLocation(layout, s, time.UTC)
+		if err != nil {
+			continue
 		}
+		if name, _ := t.Zone(); len(name) > 3 && strings.HasPrefix(name, "GMT") && !strings.Contains(layout, "-0700") {
+			// time.Parse gives "GMT+2" its offset but leaves the instant at
+			// UTC; re-anchor the wall clock in that zone.
+			u := t.UTC()
+			t = time.Date(u.Year(), u.Month(), u.Day(), u.Hour(), u.Minute(), u.Second(), u.Nanosecond(), t.Location())
+		}
+		return t, nil
 	}
 	return time.Time{}, fmt.Errorf("unrecognized time format %q", s)
+}
+
+// endsWithOffset reports whether s ends in a numeric zone offset (" +0200").
+func endsWithOffset(s string) bool {
+	n := len(s)
+	if n < 6 || s[n-6] != ' ' || (s[n-5] != '+' && s[n-5] != '-') {
+		return false
+	}
+	for _, c := range s[n-4:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
