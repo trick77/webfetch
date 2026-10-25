@@ -10,8 +10,9 @@
 // The one unavoidable deviation is content extraction: upstream runs Mozilla
 // Readability.js in a Node subprocess (readabilipy use_readability=True) plus
 // Python markdownify. That JS pipeline cannot be reproduced byte-for-byte in
-// pure Go, so we use codeberg.org/readeck/go-readability (a maintained Go port
-// of the same Readability.js) followed by JohannesKaufmann/html-to-markdown
+// pure Go, so we use a trimmed copy of codeberg.org/readeck/go-readability (a
+// maintained Go port of the same Readability.js, in internal/readability)
+// followed by JohannesKaufmann/html-to-markdown
 // configured to match markdownify's defaults (ATX headings, "*" bullets, "*"
 // emphasis). On typical pages this is byte-identical to the Python output; the
 // only observed difference is readability's URL normalization (e.g. a trailing
@@ -41,9 +42,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	readability "codeberg.org/readeck/go-readability/v2"
 	md "github.com/JohannesKaufmann/html-to-markdown"
 	"github.com/PuerkitoBio/goquery"
+	"github.com/trick77/webfetch/internal/readability"
 	"golang.org/x/net/html/charset"
 )
 

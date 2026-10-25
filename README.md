@@ -157,9 +157,10 @@ autonomous `User-Agent`, the HTML/raw content-type heuristic, the
 
 Content extraction is the one place byte-for-byte parity is impossible: upstream
 runs Mozilla Readability.js in a Node subprocess (`readabilipy`) plus
-`markdownify`. This module uses
+`markdownify`. This module uses a trimmed copy of
 [`codeberg.org/readeck/go-readability`](https://codeberg.org/readeck/go-readability)
-(a maintained Go port of the same Readability.js) and
+v2.1.3 (a maintained Go port of the same Readability.js, vendored as
+`internal/readability` to drop its weakly maintained transitive deps) and
 [`html-to-markdown`](https://github.com/JohannesKaufmann/html-to-markdown)
 configured to match markdownify's defaults (ATX headings, `*` bullets, `*`
 emphasis). On typical pages the output is byte-identical; the only observed
