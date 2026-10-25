@@ -18,7 +18,6 @@ import (
 	"testing"
 
 	"github.com/PuerkitoBio/goquery"
-	"github.com/andybalholm/cascadia"
 	"github.com/trick77/webfetch/internal/readability"
 	"golang.org/x/text/unicode/norm"
 )
@@ -891,17 +890,17 @@ func TestExtract_SelectorNormalizedMixed(t *testing.T) {
 	if out != "OTHER" {
 		t.Errorf("ExcludeSelectors: want only OTHER, got:\n%q", out)
 	}
-	// An invalid selector stays invalid: joined, its unterminated string would
-	// close on the second form's quote and parse.
-	bad := `p[title="] cafe` + "\u0301"
-	if _, err := cascadia.Compile(normalizeText(bad) + ", " + bad); err != nil {
-		t.Fatalf("fixture: joined forms should parse: %v", err)
-	}
+	// An invalid selector matches nothing, as with goquery's Find.
+	bad := `p[title="cafe` + "\u0301"
 	if out := extractContentFromHTML(page, nil, Options{Selector: bad}); out != errNoSelector {
 		t.Errorf("invalid Selector: want errNoSelector, got:\n%q", out)
 	}
-	if got := selectorQuery(bad); got != bad {
-		t.Errorf("selectorQuery(%q) = %q, want it unchanged", bad, got)
+	// A valid selector whose normalized form is not (the soft hyphen its escape
+	// targets is removed) still matches by the original form.
+	esc := `p[title=a\` + "\u00ad" + `]`
+	page = `<!doctype html><html><body><p title="a&shy;">ESC</p><p>OTHER</p></body></html>`
+	if out := extractContentFromHTML(page, nil, Options{Selector: esc}); out != "ESC" {
+		t.Errorf("Selector %q: want ESC, got:\n%q", esc, out)
 	}
 }
 

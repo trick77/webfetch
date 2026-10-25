@@ -128,14 +128,17 @@ type Options struct {
 	// FullPage converts the entire page to Markdown, skipping the Readability
 	// main-content extraction. Use it when Readability over-strips (docs pages,
 	// tables, sidebars you actually want). Ignored when Selector is set, and when
-	// Raw is set. IncludeMetadata is not applied on this path. Default false.
+	// Raw is set. IncludeMetadata is not applied on this path. The text is
+	// normalized as on the Readability path (NFC, soft hyphens removed), and
+	// Selector / ExcludeSelectors match the normalized text. Default false.
 	FullPage bool
 	// Selector, when set, converts only the element(s) matching this CSS selector
 	// to Markdown, skipping Readability (an escape hatch for targeting a specific
 	// region). Takes precedence over FullPage. Ignored when Raw is set.
-	// IncludeMetadata is not applied on this path. If nothing matches, the content
-	// is the "<error>No content matched the selector.</error>" sentinel (with a
-	// nil error). Default "".
+	// IncludeMetadata is not applied on this path; text is normalized as with
+	// FullPage. If nothing matches, the content is the
+	// "<error>No content matched the selector.</error>" sentinel (with a nil
+	// error). Default "".
 	Selector string
 	// ExcludeSelectors removes element(s) matching these CSS selectors before
 	// conversion. Unlike FullPage/Selector it composes with every non-raw mode,
@@ -410,7 +413,7 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 		}
 		for _, sel := range opts.ExcludeSelectors {
 			if sel = strings.TrimSpace(sel); sel != "" {
-				doc.Find(selectorQuery(sel)).Remove()
+				doc.FindMatcher(selectorMatcher(sel)).Remove()
 			}
 		}
 		if skipReadability {
@@ -465,23 +468,25 @@ func normalizeText(s string) string {
 	return string(b)
 }
 
-// selectorQuery returns the selector to match sel against a tree built from
-// normalizeText'd HTML: the group of sel normalized the same way, so NFD /
-// soft-hyphen text in it still matches literal text, and sel itself when that
-// differs. The page was normalized as raw bytes, so text written as a
-// reference (&shy;, &#x301;) is decoded only by the parser and stays
-// unnormalized in the tree; the original selector still matches that. One
-// group matches either form in a single pass, in document order. An invalid
-// sel is returned as is: joined, an unterminated string could swallow the
-// comma and turn it valid.
-func selectorQuery(sel string) string {
-	if _, err := cascadia.Compile(sel); err != nil {
-		return sel
+// selectorMatcher compiles sel for a tree built from normalizeText'd HTML: it
+// matches sel normalized the same way, so NFD / soft-hyphen text in it still
+// matches literal text, or sel itself. The page was normalized as raw bytes,
+// so text written as a reference (&shy;, &#x301;) is decoded only by the
+// parser and stays unnormalized in the tree; the original selector still
+// matches that. One group matches either form in a single pass, in document
+// order. An invalid sel matches nothing, as with goquery's Find; an invalid
+// normalized form (an escape whose target was removed) is skipped.
+func selectorMatcher(sel string) goquery.Matcher {
+	g, err := cascadia.ParseGroup(sel)
+	if err != nil {
+		return cascadia.Selector(cascadia.SelectorGroup(nil).Match)
 	}
 	if n := normalizeText(sel); n != sel {
-		return n + ", " + sel
+		if ng, err := cascadia.ParseGroup(n); err == nil {
+			g = append(ng, g...)
+		}
 	}
-	return sel
+	return cascadia.Selector(g.Match)
 }
 
 // selectorMarkdown converts a subtree (Selector) or the whole body (FullPage) of
@@ -490,11 +495,11 @@ func selectorQuery(sel string) string {
 func selectorMarkdown(doc *goquery.Document, opts Options) string {
 	var fragment string
 	if opts.Selector != "" {
-		q := selectorQuery(opts.Selector)
-		sel := doc.Find(q)
+		m := selectorMatcher(opts.Selector)
+		sel := doc.FindMatcher(m)
 		// A match nested inside another match is already part of the outer
 		// one's HTML; keep only the outermost so nothing is emitted twice.
-		sel = sel.NotSelection(sel.Find(q))
+		sel = sel.NotSelection(sel.FindMatcher(m))
 		if sel.Length() == 0 {
 			return errNoSelector
 		}
