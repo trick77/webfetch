@@ -145,7 +145,11 @@ type Options struct {
 	// conversion. Unlike FullPage/Selector it composes with every non-raw mode,
 	// including the default Readability path (e.g. strip a cookie banner, then
 	// simplify). Empty (the default) leaves the input untouched, so output stays
-	// byte-identical to upstream. Ignored when Raw is set.
+	// byte-identical to upstream. Ignored when Raw is set. The selectors are
+	// normalized (NFC, soft hyphens removed) on every mode, the Readability path
+	// included. A backslash-escaped soft hyphen (\AD, or \ before a literal one)
+	// is not normalized like a literal one: the selector can then match
+	// nothing, and the content stays in.
 	ExcludeSelectors []string
 }
 

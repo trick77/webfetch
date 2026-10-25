@@ -876,6 +876,9 @@ func TestExtract_SelectorNormalizedOneForm(t *testing.T) {
 	if out := extractContentFromHTML(page, nil, Options{Selector: sel}); out != "LIT1\n\nLIT3" {
 		t.Errorf("Selector: want LIT1, LIT3, got:\n%q", out)
 	}
+	if out := extractContentFromHTML(page, nil, Options{ExcludeSelectors: []string{sel}}); !strings.Contains(out, "REF2") || strings.Contains(out, "LIT1") || strings.Contains(out, "LIT3") {
+		t.Errorf("ExcludeSelectors: want only REF2, got:\n%q", out)
+	}
 	// Matching the original form too would invert a negation: "Coop" passes
 	// :not(:contains("Co\u00adop")).
 	page = `<!doctype html><html><body><article>
