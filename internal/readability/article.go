@@ -71,22 +71,31 @@ func (a Article) PublishedTime() (time.Time, error) {
 
 // timeLayouts are the published-time shapes found in meta tags and JSON-LD:
 // ISO 8601 / RFC 3339 and their common relaxations, the RFC 1123 / 850 / 822
-// family, C and JavaScript Date strings, and spelled-out dates. time.Parse
+// family, C, Go and JavaScript Date strings, and spelled-out dates. time.Parse
 // accepts fractional seconds after the seconds field even when a layout has
-// none, and Z0700 accepts "Z", "+0100" and "+01". Zone-less values are UTC.
+// none; Z0700 accepts "Z" and "+0100", Z07 "Z" and "+01". A single-digit day
+// or hour layout also takes two digits. Zone-less values are UTC.
 var timeLayouts = []string{
 	"2006-01-02T15:04:05Z07:00",
 	"2006-01-02T15:04:05Z0700",
+	"2006-01-02T15:04:05Z07",
 	"2006-01-02T15:04:05",
 	"2006-01-02T15:04:05 Z07:00",
 	"2006-01-02T15:04:05 Z0700",
+	"2006-01-02T15:04:05 UTC",
+	"2006-01-02T15:04:05 GMT",
 	"2006-01-02T15:04Z07:00",
 	"2006-01-02T15:04Z0700",
+	"2006-01-02T15:04Z07",
 	"2006-01-02T15:04",
 	"2006-01-02 15:04:05Z07:00",
 	"2006-01-02 15:04:05Z0700",
+	"2006-01-02 15:04:05Z07",
 	"2006-01-02 15:04:05 Z07:00",
 	"2006-01-02 15:04:05 Z0700",
+	"2006-01-02 15:04:05 -0700 MST", // Go time.Time.String
+	"2006-01-02 15:04:05 UTC",
+	"2006-01-02 15:04:05 GMT",
 	"2006-01-02 15:04:05",
 	"2006-01-02 15:04",
 	"2006-01-02",
@@ -97,6 +106,8 @@ var timeLayouts = []string{
 	time.RFC1123,
 	"Mon, 2 Jan 2006 15:04:05 -0700",
 	"Mon, 2 Jan 2006 15:04:05 MST",
+	"Mon, 2 Jan 2006 15:04 -0700",
+	"Mon, 2 Jan 2006 15:04 MST",
 	time.RFC850,
 	time.RFC822Z,
 	time.RFC822,
@@ -104,16 +115,25 @@ var timeLayouts = []string{
 	time.UnixDate,
 	"Mon Jan 02 2006 15:04:05 GMT-0700", // JavaScript Date.toString, "(zone name)" cut off
 	"January 2, 2006 3:04 PM",
+	"January 2, 2006 3:04 pm",
+	"January 2, 2006 15:04",
+	"Jan 2, 2006 3:04 PM",
+	"Jan 2, 2006 3:04 pm",
+	"Jan 2, 2006 15:04",
+	"Monday, January 2, 2006",
 	"January 2, 2006",
 	"Jan 2, 2006",
 	"2 January 2006",
-	"02 Jan 2006",
+	"2 Jan 2006",
 }
 
-// parseTime parses a metadata timestamp with timeLayouts, or as Unix seconds
-// (10 digits) or milliseconds (13 digits) in local time. It replaces
-// dateparse.ParseAny, which accepted many more (and ambiguous) shapes; a
-// value matching no layout is an error, as an unparsable one was before.
+// parseTime parses a metadata timestamp with timeLayouts, or as Unix seconds,
+// milliseconds, microseconds or nanoseconds (10, 13, 16 or 19 digits). It
+// replaces dateparse.ParseAny, which accepted many more (and ambiguous)
+// shapes; a value matching no layout is an error, as an unparsable one was
+// before. Results never depend on the host's zone: Unix values are UTC, and a
+// zone abbreviation without a numeric offset (other than UTC/GMT) reads as
+// offset zero instead of resolving against time.Local.
 func parseTime(s string) (time.Time, error) {
 	s = strings.TrimSpace(s)
 	if i := strings.Index(s, " ("); i > 0 && strings.HasSuffix(s, ")") && strings.Contains(s[:i], "GMT") {
@@ -122,13 +142,17 @@ func parseTime(s string) (time.Time, error) {
 	if n, err := strconv.ParseInt(s, 10, 64); err == nil && s[0] != '-' && s[0] != '+' {
 		switch len(s) {
 		case 10:
-			return time.Unix(n, 0), nil
+			return time.Unix(n, 0).UTC(), nil
 		case 13:
-			return time.UnixMilli(n), nil
+			return time.UnixMilli(n).UTC(), nil
+		case 16:
+			return time.UnixMicro(n).UTC(), nil
+		case 19:
+			return time.Unix(0, n).UTC(), nil
 		}
 	}
 	for _, layout := range timeLayouts {
-		if t, err := time.Parse(layout, s); err == nil {
+		if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil {
 			return t, nil
 		}
 	}

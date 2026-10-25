@@ -411,8 +411,7 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 			return selectorMarkdown(doc, opts)
 		}
 		// ExcludeSelectors only: hand the pruned tree straight to Readability.
-		// ParseAndMutate rather than FromDocument, which would deep-clone a
-		// tree we never use again.
+		// ParseAndMutate needs no copy: the tree is not used again.
 		parser := readability.NewParser()
 		article, err = parser.ParseAndMutate(doc.Nodes[0], base)
 	} else {

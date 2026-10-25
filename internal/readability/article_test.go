@@ -8,7 +8,8 @@ import (
 )
 
 // Expected values are what dateparse.ParseAny (the parser this replaced)
-// returned for the same input, formatted RFC 3339; "" is a parse error.
+// returned for the same input on a UTC host, formatted RFC 3339; "" is a
+// parse error.
 var timeCases = []struct{ in, want string }{
 	// Shapes seen in readability's test corpus.
 	{"2014-09-02T08:35:27-04:00", "2014-09-02T08:35:27-04:00"},
@@ -31,17 +32,37 @@ var timeCases = []struct{ in, want string }{
 	{"2006-01-02T15:04:05.999999999+05:30", "2006-01-02T15:04:05.999999999+05:30"},
 	{"2006-01-02T15:04Z", "2006-01-02T15:04:00Z"},
 	{"2006-01-02T15:04:05 +01:00", "2006-01-02T15:04:05+01:00"},
+	{"2024-01-02T10:00:00+01", "2024-01-02T10:00:00+01:00"},
+	{"2024-01-02T10:00:00.123-05", "2024-01-02T10:00:00.123-05:00"},
+	{"2024-01-02T10:00+01", "2024-01-02T10:00:00+01:00"},
+	{"2024-01-02 10:00:00+05", "2024-01-02T10:00:00+05:00"},
+	{"2024-01-02T10:00:00 GMT", "2024-01-02T10:00:00Z"},
+	{"2024-01-02T10:00:00 UTC", "2024-01-02T10:00:00Z"},
+	{"2024-01-02 10:00:00 UTC", "2024-01-02T10:00:00Z"},
+	{"2024-01-02 10:00:00 GMT", "2024-01-02T10:00:00Z"},
+	{"2024-01-02 10:00:00 +0000 UTC", "2024-01-02T10:00:00Z"},
+	{"2024-01-02 10:00:00 +0100 CET", "2024-01-02T10:00:00+01:00"},
 	{"Mon, 02 Jan 2006 15:04:05 GMT", "2006-01-02T15:04:05Z"},
+	{"Mon, 02 Jan 2006 15:04 GMT", "2006-01-02T15:04:00Z"},
+	{"Mon, 02 Jan 2006 15:04 -0700", "2006-01-02T15:04:00-07:00"},
 	{"Mon, 02 Jan 2006 15:04:05 -0700", "2006-01-02T15:04:05-07:00"},
 	{"Mon, 2 Jan 2006 15:04:05 +0000", "2006-01-02T15:04:05Z"},
 	{"Monday, 02-Jan-06 15:04:05 GMT", "2006-01-02T15:04:05Z"},
 	{"Mon Jan 2 15:04:05 2006", "2006-01-02T15:04:05Z"},
 	{"Mon Jan 2 15:04:05 MST 2006", "2006-01-02T15:04:05Z"},
+	{"Mon, 02 Jan 2006 15:04:05 PST", "2006-01-02T15:04:05Z"},
 	{"January 2, 2006 3:04 PM", "2006-01-02T15:04:00Z"},
+	{"June 5, 2024 10:30 am", "2024-06-05T10:30:00Z"},
+	{"January 2, 2006 15:04", "2006-01-02T15:04:00Z"},
+	{"Jan 2, 2006 3:04 PM", "2006-01-02T15:04:00Z"},
+	{"Jan 2, 2006 3:04 pm", "2006-01-02T15:04:00Z"},
+	{"Jan 2, 2006 15:04", "2006-01-02T15:04:00Z"},
+	{"Tuesday, January 2, 2024", "2024-01-02T00:00:00Z"},
 	{"January 2, 2006", "2006-01-02T00:00:00Z"},
 	{"Jan 2, 2006", "2006-01-02T00:00:00Z"},
 	{"2 January 2006", "2006-01-02T00:00:00Z"},
 	{"02 Jan 2006", "2006-01-02T00:00:00Z"},
+	{"2 Jan 2006", "2006-01-02T00:00:00Z"},
 	{"2006/01/02", "2006-01-02T00:00:00Z"},
 	{"  2024-06-25  ", "2024-06-25T00:00:00Z"},
 	{"2006-01", "2006-01-01T00:00:00Z"},
@@ -58,7 +79,34 @@ var timeCases = []struct{ in, want string }{
 	{"01/02/2006", ""},
 	{"2006.01.02", ""},
 	{"2006-1-2", ""},
+	{"2024-1-02", ""},
+	{"2024", ""},
+	{"Monday, 02-Jan-2006 15:04:05 GMT", ""},
 	{"Jan 2, 2006 at 3:04pm", ""},
+}
+
+// TestParseTimeHostZone pins that parseTime ignores time.Local: Go resolves a
+// zone abbreviation against the local zone in time.Parse, so "MST" read as
+// -07:00 on a Denver host and as +00:00 elsewhere.
+func TestParseTimeHostZone(t *testing.T) {
+	saved := time.Local
+	t.Cleanup(func() { time.Local = saved })
+	for _, name := range []string{"America/Denver", "America/Los_Angeles", "Europe/Zurich", "Asia/Kolkata"} {
+		loc, err := time.LoadLocation(name)
+		if err != nil {
+			t.Skipf("no tzdata for %s: %v", name, err)
+		}
+		time.Local = loc
+		for _, c := range timeCases {
+			got := ""
+			if tm, err := parseTime(c.in); err == nil {
+				got = tm.Format(time.RFC3339Nano)
+			}
+			if got != c.want {
+				t.Errorf("%s: parseTime(%q) = %q, want %q", name, c.in, got, c.want)
+			}
+		}
+	}
 }
 
 func TestParseTime(t *testing.T) {
@@ -74,14 +122,16 @@ func TestParseTime(t *testing.T) {
 }
 
 func TestParseTimeUnix(t *testing.T) {
-	cases := map[string]time.Time{
-		"1700000000":    time.Unix(1700000000, 0),
-		"1700000000123": time.UnixMilli(1700000000123),
+	cases := map[string]string{
+		"1700000000":          "2023-11-14T22:13:20Z",
+		"1700000000123":       "2023-11-14T22:13:20.123Z",
+		"1700000000123456":    "2023-11-14T22:13:20.123456Z",
+		"1700000000123456789": "2023-11-14T22:13:20.123456789Z",
 	}
 	for in, want := range cases {
 		got, err := parseTime(in)
-		if err != nil || !got.Equal(want) || got.Location() != time.Local {
-			t.Errorf("parseTime(%q) = %v, %v; want %v local", in, got, err, want)
+		if err != nil || got.Format(time.RFC3339Nano) != want || got.Location() != time.UTC {
+			t.Errorf("parseTime(%q) = %v, %v; want %s", in, got, err, want)
 		}
 	}
 	for _, in := range []string{"170000000", "+1700000000", "-170000000"} {
