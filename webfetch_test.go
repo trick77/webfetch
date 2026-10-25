@@ -280,6 +280,72 @@ func TestFetch_EscapeHatch(t *testing.T) {
 	if !strings.Contains(miss, "<error>No content matched the selector.</error>") {
 		t.Fatalf("expected no-match sentinel, got:\n%s", miss)
 	}
+
+	// An unparseable selector is reported as such, not as a miss (Selector)
+	// or ignored (ExcludeSelectors); no page content, nil error.
+	for _, tc := range []struct {
+		opts Options
+		want string
+	}{
+		{Options{Selector: "div["}, `<error>Invalid selector "div[": expected identifier, found EOF instead.</error>`},
+		{Options{ExcludeSelectors: []string{"div["}}, `<error>Invalid exclude selector "div[": expected identifier, found EOF instead.</error>`},
+	} {
+		out, err := Fetch(context.Background(), srv.URL+"/p", tc.opts)
+		if err != nil {
+			t.Fatalf("%+v: invalid selector must not error: %v", tc.opts, err)
+		}
+		if want := "Contents of " + srv.URL + "/p:\n" + tc.want; out != want {
+			t.Fatalf("%+v: want %q, got:\n%s", tc.opts, want, out)
+		}
+	}
+}
+
+func TestExtract_InvalidSelector(t *testing.T) {
+	page := `<!doctype html><html><body>
+		<article><h1>Heading</h1><p>KEEP the primary body text, long enough to be the main content of the page.</p>
+		<p class="ad">AD a removable sentence with enough words that readability keeps it by default.</p></article>
+		</body></html>`
+	for _, tc := range []struct {
+		opts Options
+		want string
+	}{
+		{Options{Selector: "div["}, `Invalid selector "div[": `},
+		{Options{Selector: "#"}, `Invalid selector "#": `},
+		{Options{Selector: "::before"}, `Invalid selector "::before": `},
+		// One bad member fails the whole group, though the other would match.
+		{Options{Selector: "article, p["}, `Invalid selector "article, p[": `},
+		{Options{FullPage: true, Selector: "article >"}, `Invalid selector "article >": `},
+		// Every mode an exclude composes with: Readability, FullPage, Selector.
+		{Options{ExcludeSelectors: []string{"p["}}, `Invalid exclude selector "p[": `},
+		{Options{FullPage: true, ExcludeSelectors: []string{".ad", " ", "p:nope"}}, `Invalid exclude selector "p:nope": `},
+		{Options{Selector: "article", ExcludeSelectors: []string{".ad, p["}}, `Invalid exclude selector ".ad, p[": `},
+		// Excludes are checked first; the selector is the normalized one.
+		{Options{Selector: "p[", ExcludeSelectors: []string{"x" + string(rune(0xAD)) + "["}}, `Invalid exclude selector "x[": `},
+	} {
+		out := extractContentFromHTML(page, nil, tc.opts)
+		if !strings.HasPrefix(out, "<error>"+tc.want) || !strings.HasSuffix(out, ".</error>") || strings.Contains(out, "KEEP") {
+			t.Errorf("%+v: want %q sentinel only, got:\n%q", tc.opts, tc.want, out)
+		}
+		if out == errNoSelector {
+			t.Errorf("%+v: invalid selector reported as no match", tc.opts)
+		}
+	}
+	// Valid selectors still match, the group and the exclude included.
+	if out := extractContentFromHTML(page, nil, Options{Selector: "article, h1", ExcludeSelectors: []string{"x, .ad"}}); out != "# Heading\n\nKEEP the primary body text, long enough to be the main content of the page." {
+		t.Errorf("valid selectors: unexpected result:\n%q", out)
+	}
+}
+
+func TestCompileSelectors(t *testing.T) {
+	// Unset selectors compile to nothing, so selectorMarkdown runs FullPage.
+	cs, bad := compileSelectors(Options{})
+	if bad != "" || cs.sel != nil || cs.exclude != nil {
+		t.Errorf("unset: want zero value, got %+v, %q", cs, bad)
+	}
+	cs, bad = compileSelectors(Options{Selector: "p", ExcludeSelectors: []string{".a", ".b"}})
+	if bad != "" || cs.sel == nil || len(cs.exclude) != 2 {
+		t.Errorf("valid: want 1 + 2 matchers, got %+v, %q", cs, bad)
+	}
 }
 
 func TestFetch_RawSkipsSimplification(t *testing.T) {

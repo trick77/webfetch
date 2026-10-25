@@ -139,7 +139,10 @@ Readability path. Text is normalized as on the Readability path (NFC, soft
 hyphens removed) and selectors with it; text the page writes as a reference
 (`&shy;`, `&#x301;`) stays as written. A blank (whitespace only once normalized)
 `Selector` or `ExcludeSelectors` entry counts as unset; others go to the CSS
-parser as given. With all of them unset (the default),
+parser as given. One it rejects (any member of a group) returns, with a nil
+error, only `<error>Invalid selector "<sel>": <reason>.</error>` or
+`<error>Invalid exclude selector "<sel>": <reason>.</error>`, never page
+content. With all of them unset (the default),
 output is byte-identical to upstream.
 
 ### Body cap: `MaxBodyBytes` (10 MiB by default)

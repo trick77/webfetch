@@ -44,6 +44,7 @@ import (
 
 	md "github.com/JohannesKaufmann/html-to-markdown"
 	"github.com/PuerkitoBio/goquery"
+	"github.com/andybalholm/cascadia"
 	"github.com/trick77/webfetch/internal/readability"
 	"golang.org/x/net/html/charset"
 	"golang.org/x/text/unicode/norm"
@@ -78,6 +79,13 @@ const (
 	errNoMoreContent = "<error>No more content available.</error>"
 	errSimplify      = "<error>Page failed to be simplified from HTML</error>"
 	errNoSelector    = "<error>No content matched the selector.</error>" // own, for Selector
+)
+
+// Own sentinels for an unparseable Selector / ExcludeSelectors entry: the
+// (normalized) selector and the CSS parser's message.
+const (
+	errBadSelector        = "<error>Invalid selector %q: %s.</error>"
+	errBadExcludeSelector = "<error>Invalid exclude selector %q: %s.</error>"
 )
 
 // Options mirror the upstream tool's parameters.
@@ -140,14 +148,19 @@ type Options struct {
 	// FullPage. If nothing matches, the content is the
 	// "<error>No content matched the selector.</error>" sentinel (with a nil
 	// error). A blank Selector (whitespace only once normalized) counts as
-	// unset; others go to the CSS parser as given. Default "".
+	// unset; others go to the CSS parser as given. One the parser rejects
+	// (any member of a group) yields "<error>Invalid selector "<sel>": <reason>.</error>"
+	// instead, also with a nil error. Default "".
 	Selector string
 	// ExcludeSelectors removes element(s) matching these CSS selectors before
 	// conversion. Unlike FullPage/Selector it composes with every non-raw mode,
 	// including the default Readability path (e.g. strip a cookie banner, then
 	// simplify). Empty (the default) leaves the input untouched, so output stays
 	// byte-identical to upstream. Ignored when Raw is set. Blank entries are
-	// dropped (as Selector), others used as given. The selectors are
+	// dropped (as Selector), others used as given. An entry the parser rejects
+	// fails the extraction rather than keep what it should drop: the content
+	// is only "<error>Invalid exclude selector "<sel>": <reason>.</error>"
+	// (with a nil error). The selectors are
 	// normalized (NFC, soft hyphens removed) on every mode, the Readability path
 	// included. A backslash-escaped soft hyphen is not normalized like a literal
 	// one: \AD matches only text the page writes as &shy;, and \ before a
@@ -409,6 +422,10 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 	// to upstream.
 	if len(opts.ExcludeSelectors) > 0 || opts.Selector != "" || opts.FullPage {
 		skipReadability := opts.Selector != "" || opts.FullPage
+		cs, bad := compileSelectors(opts)
+		if bad != "" {
+			return bad
+		}
 		// Readability's Parse normalizes the text (NFC, soft hyphens removed)
 		// before parsing; every opt-in mode does the same, so a page reads the
 		// same whichever mode extracts it.
@@ -420,15 +437,15 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 		if perr != nil {
 			return errSimplify
 		}
-		for _, sel := range opts.ExcludeSelectors {
-			doc.Find(sel).Remove()
+		for _, m := range cs.exclude {
+			doc.FindMatcher(m).Remove()
 		}
 		if skipReadability {
 			// Readability absolutizes links and drops javascript: links
 			// itself; do the same here so both paths agree (the latter in
 			// selectorMarkdown, after matching).
 			absolutizeLinks(doc, base)
-			return selectorMarkdown(doc, opts)
+			return selectorMarkdown(doc, cs.sel)
 		}
 		// ExcludeSelectors only: hand the pruned tree straight to Readability.
 		// ParseAndMutate needs no copy: the tree is not used again.
@@ -481,6 +498,36 @@ func cleanSelector(sel string) string {
 	return sel
 }
 
+// compiledSelectors holds the cleaned Selector (nil when unset) and
+// ExcludeSelectors, each compiled once for every match pass.
+type compiledSelectors struct {
+	sel     goquery.Matcher
+	exclude []goquery.Matcher
+}
+
+// compileSelectors compiles the cleaned selectors of o with cascadia.Compile,
+// the parser goquery's Find uses, so a valid selector matches exactly as
+// before. A selector it rejects, which Find would silently treat as matching
+// nothing, is returned as bad: the sentinel naming it. ExcludeSelectors are
+// checked first, as they are applied first.
+func compileSelectors(o Options) (cs compiledSelectors, bad string) {
+	for _, s := range o.ExcludeSelectors {
+		m, err := cascadia.Compile(s)
+		if err != nil {
+			return compiledSelectors{}, fmt.Sprintf(errBadExcludeSelector, s, err)
+		}
+		cs.exclude = append(cs.exclude, m)
+	}
+	if o.Selector != "" {
+		m, err := cascadia.Compile(o.Selector)
+		if err != nil {
+			return compiledSelectors{}, fmt.Sprintf(errBadSelector, o.Selector, err)
+		}
+		cs.sel = m
+	}
+	return cs, ""
+}
+
 // isNormalText reports whether readability.NormalizeText would leave s as
 // is: it is valid UTF-8 (the transform turns invalid bytes into U+FFFD), NFC and
 // has no soft hyphen (almost every page).
@@ -501,17 +548,16 @@ func normalizeText(s string) string {
 	return string(b)
 }
 
-// selectorMarkdown converts a subtree (Selector) or the whole body (FullPage) of
-// an already-normalized, pruned, link-absolutized document to Markdown,
-// skipping Readability.
-func selectorMarkdown(doc *goquery.Document, opts Options) string {
+// selectorMarkdown converts the subtree(s) matching m (Selector) or, with a nil
+// m, the whole body (FullPage) of an already-normalized, pruned,
+// link-absolutized document to Markdown, skipping Readability.
+func selectorMarkdown(doc *goquery.Document, m goquery.Matcher) string {
 	var fragment string
-	if opts.Selector != "" {
-		q := normalizeText(opts.Selector)
-		sel := doc.Find(q)
+	if m != nil {
+		sel := doc.FindMatcher(m)
 		// A match nested inside another match is already part of the outer
 		// one's HTML; keep only the outermost so nothing is emitted twice.
-		sel = sel.NotSelection(sel.Find(q))
+		sel = sel.NotSelection(sel.FindMatcher(m))
 		if sel.Length() == 0 {
 			return errNoSelector
 		}
