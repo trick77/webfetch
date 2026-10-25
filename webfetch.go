@@ -40,6 +40,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	md "github.com/JohannesKaufmann/html-to-markdown"
@@ -152,7 +153,8 @@ type Options struct {
 	// unset; others go to the CSS parser as given. On an HTML page, one the
 	// parser rejects (any member of a group) yields
 	// "<error>Invalid selector "<sel>": <reason>.</error>" instead, also with
-	// a nil error. Default "".
+	// a nil error; <sel> and <reason> are shown with control characters as
+	// spaces, < > as ‹ ›, and cut to 200 runes. Default "".
 	Selector string
 	// ExcludeSelectors removes element(s) matching these CSS selectors before
 	// conversion. Unlike FullPage/Selector it composes with every non-raw mode,
@@ -163,7 +165,7 @@ type Options struct {
 	// the parser rejects fails the extraction rather than keep what it should
 	// drop: the content is only
 	// "<error>Invalid exclude selector "<sel>": <reason>.</error>" (with a nil
-	// error). The selectors are
+	// error), shown as for Selector. The selectors are
 	// normalized (NFC, soft hyphens removed) on every mode, the Readability path
 	// included. A backslash-escaped soft hyphen is not normalized like a literal
 	// one: \AD matches only text the page writes as &shy;, and \ before a
@@ -517,14 +519,14 @@ func compileSelectors(o Options) (cs compiledSelectors, bad string) {
 	for _, s := range o.ExcludeSelectors {
 		m, err := cascadia.Compile(s)
 		if err != nil {
-			return compiledSelectors{}, fmt.Sprintf(errBadExcludeSelector, s, selectorReason(s, err))
+			return compiledSelectors{}, fmt.Sprintf(errBadExcludeSelector, selectorShown(s), selectorShown(selectorReason(s, err)))
 		}
 		cs.exclude = append(cs.exclude, m)
 	}
 	if o.Selector != "" {
 		m, err := cascadia.Compile(o.Selector)
 		if err != nil {
-			return compiledSelectors{}, fmt.Sprintf(errBadSelector, o.Selector, selectorReason(o.Selector, err))
+			return compiledSelectors{}, fmt.Sprintf(errBadSelector, selectorShown(o.Selector), selectorShown(selectorReason(o.Selector, err)))
 		}
 		cs.sel = m
 	}
@@ -535,6 +537,35 @@ func compileSelectors(o Options) (cs compiledSelectors, bad string) {
 // sel it prefixes to "N bytes left over": the sentinel shows sel already.
 func selectorReason(sel string, err error) string {
 	return strings.TrimPrefix(err.Error(), fmt.Sprintf("parsing %q: ", sel))
+}
+
+// maxSelectorShown caps the runes of a selector, or of a reason, in a sentinel.
+const maxSelectorShown = 200
+
+// selectorShown is s made safe to show inside an <error> sentinel, still
+// readable: a control character (newline, NUL, …) becomes a space and < > become
+// ‹ ›, so the caller's input can't break the wrapper, and past
+// maxSelectorShown runes it is cut with "…". Backslashes stay as written.
+func selectorShown(s string) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if n == maxSelectorShown {
+			b.WriteRune('…')
+			break
+		}
+		switch {
+		case unicode.IsControl(r):
+			r = ' '
+		case r == '<':
+			r = '‹'
+		case r == '>':
+			r = '›'
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
 }
 
 // isNormalText reports whether readability.NormalizeText would leave s as
