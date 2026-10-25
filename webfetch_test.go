@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/andybalholm/cascadia"
 	"github.com/trick77/webfetch/internal/readability"
 	"golang.org/x/text/unicode/norm"
 )
@@ -279,6 +280,107 @@ func TestFetch_EscapeHatch(t *testing.T) {
 	}
 	if !strings.Contains(miss, "<error>No content matched the selector.</error>") {
 		t.Fatalf("expected no-match sentinel, got:\n%s", miss)
+	}
+
+	// An unparseable selector is reported as such, not as a miss (Selector)
+	// or ignored (ExcludeSelectors); no page content, nil error.
+	for _, tc := range []struct {
+		opts Options
+		want string
+	}{
+		{Options{Selector: "div["}, `<error>Invalid selector "div[": `},
+		{Options{ExcludeSelectors: []string{`a[href="x\"`}}, `<error>Invalid exclude selector "a[href="x\"": `},
+		// The caller's input can't break the one-line <error>…</error>.
+		{Options{Selector: "div\n\r\t\x00["}, `<error>Invalid selector "div    [": `},
+		{Options{Selector: "p</error><x>["}, `<error>Invalid selector "p‹/error›‹x›[": `},
+		{Options{ExcludeSelectors: []string{"#<"}}, `<error>Invalid exclude selector "#‹": `},
+		{Options{Selector: strings.Repeat("a", 300) + "["}, `<error>Invalid selector "` + strings.Repeat("a", 200) + `…": `},
+	} {
+		out, err := Fetch(context.Background(), srv.URL+"/p", tc.opts)
+		if err != nil {
+			t.Fatalf("%+v: invalid selector must not error: %v", tc.opts, err)
+		}
+		// The reason is the CSS parser's wording, not pinned here.
+		head := "Contents of " + srv.URL + "/p:\n"
+		if want := head + tc.want; !strings.HasPrefix(out, want) || !strings.HasSuffix(out, ".</error>") || strings.Count(out, "\n") != 1 {
+			t.Fatalf("%+v: want %q…, got:\n%q", tc.opts, want, out)
+		}
+		inner := strings.TrimSuffix(strings.TrimPrefix(out, head+"<error>"), "</error>")
+		if strings.ContainsAny(inner, "<>\x00\r\t") {
+			t.Fatalf("%+v: raw markup or control character inside the sentinel: %q", tc.opts, out)
+		}
+	}
+}
+
+func TestExtract_InvalidSelector(t *testing.T) {
+	page := `<!doctype html><html><body>
+		<article><h1>Heading</h1><p>KEEP the primary body text, long enough to be the main content of the page.</p>
+		<p class="ad">AD a removable sentence with enough words that readability keeps it by default.</p></article>
+		</body></html>`
+	for _, tc := range []struct {
+		opts Options
+		want string
+	}{
+		{Options{Selector: "div["}, `Invalid selector "div[": `},
+		{Options{Selector: "#"}, `Invalid selector "#": `},
+		{Options{Selector: "::before"}, `Invalid selector "::before": `},
+		// One bad member fails the whole group, though the other would match.
+		{Options{Selector: "article, p["}, `Invalid selector "article, p[": `},
+		{Options{FullPage: true, Selector: "article >"}, `Invalid selector "article ›": `},
+		// Every mode an exclude composes with: Readability, FullPage, Selector.
+		{Options{ExcludeSelectors: []string{"p["}}, `Invalid exclude selector "p[": `},
+		{Options{FullPage: true, ExcludeSelectors: []string{".ad", " ", "p:nope"}}, `Invalid exclude selector "p:nope": `},
+		{Options{Selector: "article", ExcludeSelectors: []string{".ad, p["}}, `Invalid exclude selector ".ad, p[": `},
+		// Excludes are checked first; the selector is the normalized one.
+		{Options{Selector: "p[", ExcludeSelectors: []string{"x" + string(rune(0xAD)) + "["}}, `Invalid exclude selector "x[": `},
+	} {
+		out := extractContentFromHTML(page, nil, tc.opts)
+		if !strings.HasPrefix(out, "<error>"+tc.want) || !strings.HasSuffix(out, ".</error>") || strings.Contains(out, "KEEP") {
+			t.Errorf("%+v: want %q sentinel only, got:\n%q", tc.opts, tc.want, out)
+		}
+		if out == errNoSelector {
+			t.Errorf("%+v: invalid selector reported as no match", tc.opts)
+		}
+	}
+	// Valid selectors still match, the group and the exclude included.
+	if out := extractContentFromHTML(page, nil, Options{Selector: "article, h1", ExcludeSelectors: []string{"x, .ad"}}); out != "# Heading\n\nKEEP the primary body text, long enough to be the main content of the page." {
+		t.Errorf("valid selectors: unexpected result:\n%q", out)
+	}
+}
+
+func TestSelectorReason(t *testing.T) {
+	// Leftover input: cascadia's message repeats the selector Go-quoted
+	// (doubled backslashes); the sentinel shows it once, as written.
+	sel := `#a\ b)`
+	_, err := cascadia.Compile(sel)
+	if err == nil {
+		t.Fatal("precondition: want a parse error")
+	}
+	if got := selectorReason(sel, err); strings.Contains(got, "parsing") || strings.Contains(got, `\\`) || got == "" {
+		t.Errorf("selectorReason(%q) = %q, want the message without the quoted selector", sel, got)
+	}
+	// Other messages pass through.
+	if got := selectorReason("x", errors.New("expected identifier")); got != "expected identifier" {
+		t.Errorf("selectorReason: got %q", got)
+	}
+}
+
+func TestSelectorShown(t *testing.T) {
+	long := strings.Repeat("é", 250)
+	for _, tc := range []struct{ in, want string }{
+		{"div\np", "div p"},
+		{"a\x00b\r\tc\u0085d", "a b  c d"},
+		{`p</error><error>x`, `p‹/error›‹error›x`},
+		{"article > p", "article › p"},
+		// CSS escapes stay as written, not Go-quoted.
+		{`#a\ b, a[href="x\"y"], .\31 0`, `#a\ b, a[href="x\"y"], .\31 0`},
+		{long, strings.Repeat("é", 200) + "…"},
+		{long[:400], long[:400]}, // exactly 200 runes: not cut
+		{"", ""},
+	} {
+		if got := selectorShown(tc.in); got != tc.want {
+			t.Errorf("selectorShown(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 
