@@ -44,6 +44,7 @@ import (
 
 	md "github.com/JohannesKaufmann/html-to-markdown"
 	"github.com/PuerkitoBio/goquery"
+	"github.com/andybalholm/cascadia"
 	"github.com/trick77/webfetch/internal/readability"
 	"golang.org/x/net/html/charset"
 	"golang.org/x/text/unicode/norm"
@@ -399,15 +400,17 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 		// Readability's Parse normalizes the text (NFC, soft hyphens removed)
 		// before parsing; every opt-in mode does the same, so a page reads the
 		// same whichever mode extracts it.
-		doc, perr := goquery.NewDocumentFromReader(strings.NewReader(normalizeText(page)))
+		var src io.Reader = strings.NewReader(page)
+		if !isNormalText(page) {
+			src = readability.NormalizeText(src)
+		}
+		doc, perr := goquery.NewDocumentFromReader(src)
 		if perr != nil {
 			return errSimplify
 		}
 		for _, sel := range opts.ExcludeSelectors {
 			if sel = strings.TrimSpace(sel); sel != "" {
-				for _, q := range selectorForms(sel) {
-					doc.Find(q).Remove()
-				}
+				doc.Find(selectorQuery(sel)).Remove()
 			}
 		}
 		if skipReadability {
@@ -443,11 +446,16 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 	return markdown
 }
 
-// normalizeText applies readability.NormalizeText to s. Text that is already
-// NFC and has no soft hyphen (almost every page) is returned as is, which is
-// what the transform would produce, without the copy.
+// isNormalText reports whether readability.NormalizeText would leave s as
+// is: it is NFC and has no soft hyphen (almost every page).
+func isNormalText(s string) bool {
+	return norm.NFC.IsNormalString(s) && !strings.ContainsRune(s, 0xAD)
+}
+
+// normalizeText applies readability.NormalizeText to s, without the copy when
+// isNormalText.
 func normalizeText(s string) string {
-	if norm.NFC.IsNormalString(s) && !strings.ContainsRune(s, 0xAD) {
+	if isNormalText(s) {
 		return s
 	}
 	b, err := io.ReadAll(readability.NormalizeText(strings.NewReader(s)))
@@ -457,17 +465,23 @@ func normalizeText(s string) string {
 	return string(b)
 }
 
-// selectorForms returns the selectors to try for sel against a tree built
-// from normalizeText'd HTML: sel normalized the same way, so NFD / soft-hyphen
-// text in it still matches literal text, then sel itself when that differs.
-// The page was normalized as raw bytes, so text written as a reference
-// (&shy;, &#x301;) is decoded only by the parser and stays unnormalized in
-// the tree; the original selector still matches that.
-func selectorForms(sel string) []string {
-	if n := normalizeText(sel); n != sel {
-		return []string{n, sel}
+// selectorQuery returns the selector to match sel against a tree built from
+// normalizeText'd HTML: the group of sel normalized the same way, so NFD /
+// soft-hyphen text in it still matches literal text, and sel itself when that
+// differs. The page was normalized as raw bytes, so text written as a
+// reference (&shy;, &#x301;) is decoded only by the parser and stays
+// unnormalized in the tree; the original selector still matches that. One
+// group matches either form in a single pass, in document order. An invalid
+// sel is returned as is: joined, an unterminated string could swallow the
+// comma and turn it valid.
+func selectorQuery(sel string) string {
+	if _, err := cascadia.Compile(sel); err != nil {
+		return sel
 	}
-	return []string{sel}
+	if n := normalizeText(sel); n != sel {
+		return n + ", " + sel
+	}
+	return sel
 }
 
 // selectorMarkdown converts a subtree (Selector) or the whole body (FullPage) of
@@ -476,17 +490,8 @@ func selectorForms(sel string) []string {
 func selectorMarkdown(doc *goquery.Document, opts Options) string {
 	var fragment string
 	if opts.Selector != "" {
-		// The first selector form that matches wins (see selectorForms); a
-		// union would not keep document order.
-		var (
-			q   string
-			sel *goquery.Selection
-		)
-		for _, q = range selectorForms(opts.Selector) {
-			if sel = doc.Find(q); sel.Length() > 0 {
-				break
-			}
-		}
+		q := selectorQuery(opts.Selector)
+		sel := doc.Find(q)
 		// A match nested inside another match is already part of the outer
 		// one's HTML; keep only the outermost so nothing is emitted twice.
 		sel = sel.NotSelection(sel.Find(q))

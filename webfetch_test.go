@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/andybalholm/cascadia"
 	"github.com/trick77/webfetch/internal/readability"
 	"golang.org/x/text/unicode/norm"
 )
@@ -869,6 +870,38 @@ func TestExtract_SelectorNormalized(t *testing.T) {
 				t.Errorf("%s: ExcludeSelectors %q: unexpected result:\n%s", name, sel, out)
 			}
 		}
+	}
+}
+
+func TestExtract_SelectorNormalizedMixed(t *testing.T) {
+	// One page with the text written both literally and as a reference: each
+	// selector form matches one element, and both come back in document order.
+	page := `<!doctype html><html><body>
+		<p title="cafe` + "\u0301" + `">LIT1</p>
+		<p title="cafe&#x301;">REF2</p>
+		<p title="cafe` + "\u0301" + `">LIT3</p>
+		<p>OTHER</p>
+		</body></html>`
+	sel := `p[title="cafe` + "\u0301" + `"]`
+	out := extractContentFromHTML(page, nil, Options{Selector: sel})
+	if out != "LIT1\n\nREF2\n\nLIT3" {
+		t.Errorf("Selector: want all three in order, got:\n%q", out)
+	}
+	out = extractContentFromHTML(page, nil, Options{FullPage: true, ExcludeSelectors: []string{sel}})
+	if out != "OTHER" {
+		t.Errorf("ExcludeSelectors: want only OTHER, got:\n%q", out)
+	}
+	// An invalid selector stays invalid: joined, its unterminated string would
+	// close on the second form's quote and parse.
+	bad := `p[title="] cafe` + "\u0301"
+	if _, err := cascadia.Compile(normalizeText(bad) + ", " + bad); err != nil {
+		t.Fatalf("fixture: joined forms should parse: %v", err)
+	}
+	if out := extractContentFromHTML(page, nil, Options{Selector: bad}); out != errNoSelector {
+		t.Errorf("invalid Selector: want errNoSelector, got:\n%q", out)
+	}
+	if got := selectorQuery(bad); got != bad {
+		t.Errorf("selectorQuery(%q) = %q, want it unchanged", bad, got)
 	}
 }
 
