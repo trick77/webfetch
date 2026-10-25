@@ -45,6 +45,12 @@ func TestExtractParity(t *testing.T) {
 			if got := extractContentFromHTML(body, base, excl); got != string(want) {
 				t.Errorf("ExcludeSelectors output differs from golden\n--- got ---\n%s\n--- want ---\n%s", got, want)
 			}
+			// A blank Selector is unset: the default path, metadata included.
+			for _, sel := range []string{" ", "\t\n"} {
+				if got := extractContentFromHTML(body, base, Options{IncludeMetadata: true, Selector: sel}); got != string(want) {
+					t.Errorf("Selector %q output differs from golden\n--- got ---\n%s\n--- want ---\n%s", sel, got, want)
+				}
+			}
 		})
 	}
 }

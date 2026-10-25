@@ -139,13 +139,15 @@ type Options struct {
 	// IncludeMetadata is not applied on this path; text is normalized as with
 	// FullPage. If nothing matches, the content is the
 	// "<error>No content matched the selector.</error>" sentinel (with a nil
-	// error). Default "".
+	// error). A blank (whitespace-only) Selector counts as unset; surrounding
+	// whitespace is otherwise left to the CSS parser. Default "".
 	Selector string
 	// ExcludeSelectors removes element(s) matching these CSS selectors before
 	// conversion. Unlike FullPage/Selector it composes with every non-raw mode,
 	// including the default Readability path (e.g. strip a cookie banner, then
 	// simplify). Empty (the default) leaves the input untouched, so output stays
-	// byte-identical to upstream. Ignored when Raw is set. The selectors are
+	// byte-identical to upstream. Ignored when Raw is set. Blank entries are
+	// skipped, others are used as given (as Selector). The selectors are
 	// normalized (NFC, soft hyphens removed) on every mode, the Readability path
 	// included. A backslash-escaped soft hyphen is not normalized like a literal
 	// one: \AD matches only text the page writes as &shy;, and \ before a
@@ -399,6 +401,12 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 		article readability.Article
 		err     error
 	)
+	// A blank Selector matches nothing (cascadia rejects it); treat it as unset.
+	// Non-blank ones are passed as is: the CSS parser skips the padding, and
+	// trimming would break a trailing escaped space ("#a\ ").
+	if isBlank(opts.Selector) {
+		opts.Selector = ""
+	}
 	// Escape-hatch pre-pass. ExcludeSelectors composes with every mode (including
 	// the default Readability path); Selector / FullPage skip Readability. When
 	// none are set this block is skipped entirely and the output is byte-identical
@@ -417,7 +425,7 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 			return errSimplify
 		}
 		for _, sel := range opts.ExcludeSelectors {
-			if sel = strings.TrimSpace(sel); sel != "" {
+			if !isBlank(sel) {
 				doc.Find(normalizeText(sel)).Remove()
 			}
 		}
@@ -452,6 +460,11 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 		}
 	}
 	return markdown
+}
+
+// isBlank reports whether a selector is empty or whitespace only.
+func isBlank(sel string) bool {
+	return strings.TrimSpace(sel) == ""
 }
 
 // isNormalText reports whether readability.NormalizeText would leave s as

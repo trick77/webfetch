@@ -252,6 +252,14 @@ func TestFetch_EscapeHatch(t *testing.T) {
 	if !strings.Contains(def, "DROPMARKER") {
 		t.Fatalf("precondition: default Readability path should keep the drop paragraph, got:\n%s", def)
 	}
+	// A blank Selector (an untrimmed tool argument) is the default path.
+	blank, err := Fetch(context.Background(), srv.URL+"/p", Options{Selector: " "})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if blank != def {
+		t.Fatalf("blank Selector should match the default output, got:\n%s", blank)
+	}
 	excl, err := Fetch(context.Background(), srv.URL+"/p", Options{ExcludeSelectors: []string{".drop"}})
 	if err != nil {
 		t.Fatalf("Fetch error: %v", err)
@@ -892,6 +900,32 @@ func TestExtract_SelectorNormalizedOneForm(t *testing.T) {
 	}
 	if out := extractContentFromHTML(page, nil, Options{ExcludeSelectors: []string{sel}}); !strings.Contains(out, "KEEP Coop") || strings.Contains(out, "OTHER") {
 		t.Errorf("negated ExcludeSelectors: want only KEEP Coop, got:\n%q", out)
+	}
+}
+
+func TestExtract_SelectorWhitespace(t *testing.T) {
+	page := `<!doctype html><html><body>
+		<p id="a">AAA</p>
+		<p id="s ">SSS</p>
+		<p>OTHER</p>
+		</body></html>`
+	full := extractContentFromHTML(page, nil, Options{FullPage: true})
+	// Blank Selector is unset: FullPage applies as if it were "".
+	if out := extractContentFromHTML(page, nil, Options{FullPage: true, Selector: " \t"}); out != full {
+		t.Errorf("blank Selector with FullPage: want FullPage output, got:\n%q", out)
+	}
+	// Padding is insignificant; a trailing escaped space is part of the id.
+	for sel, want := range map[string]string{" #a\n": "AAA", "#s\\ ": "SSS", " #a , #s\\  ": "AAA\n\nSSS"} {
+		if out := extractContentFromHTML(page, nil, Options{Selector: sel}); out != want {
+			t.Errorf("Selector %q: want %q, got %q", sel, want, out)
+		}
+	}
+	// Blank ExcludeSelectors entries are skipped; others are used as given.
+	if out := extractContentFromHTML(page, nil, Options{FullPage: true, ExcludeSelectors: []string{"", " ", "\n"}}); out != full {
+		t.Errorf("blank ExcludeSelectors: want FullPage output, got:\n%q", out)
+	}
+	if out := extractContentFromHTML(page, nil, Options{FullPage: true, ExcludeSelectors: []string{" ", "#s\\ "}}); strings.Contains(out, "SSS") || !strings.Contains(out, "AAA") {
+		t.Errorf("ExcludeSelectors escaped space: want SSS removed, got:\n%q", out)
 	}
 }
 
