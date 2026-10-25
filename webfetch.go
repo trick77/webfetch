@@ -408,6 +408,11 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 		}
 		for _, sel := range opts.ExcludeSelectors {
 			if sel = strings.TrimSpace(sel); sel != "" {
+				if viaReadability {
+					// Normalize the selector like the tree, or NFD / soft-hyphen
+					// text in it would no longer match.
+					sel = normalizeSelector(sel)
+				}
 				doc.Find(sel).Remove()
 			}
 		}
@@ -442,6 +447,15 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 		}
 	}
 	return markdown
+}
+
+// normalizeSelector applies readability.NormalizeText to a selector string.
+func normalizeSelector(sel string) string {
+	b, err := io.ReadAll(readability.NormalizeText(strings.NewReader(sel)))
+	if err != nil {
+		return sel
+	}
+	return string(b)
 }
 
 // selectorMarkdown converts a subtree (Selector) or the whole body (FullPage) of
