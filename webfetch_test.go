@@ -298,7 +298,7 @@ func TestFetch_EscapeHatch(t *testing.T) {
 	} {
 		out, err := Fetch(context.Background(), srv.URL+"/p", tc.opts)
 		if err != nil {
-			t.Fatalf("%+v: invalid selector must not error: %v", tc.opts, err)
+			t.Fatalf("%+v: rejected selector must not error: %v", tc.opts, err)
 		}
 		// The reason is the CSS parser's wording, not pinned here.
 		head := "Contents of " + srv.URL + "/p:\n"
@@ -341,7 +341,7 @@ func TestExtract_InvalidSelector(t *testing.T) {
 			t.Errorf("%+v: want %q sentinel only, got:\n%q", tc.opts, tc.want, out)
 		}
 		if out == errNoSelector {
-			t.Errorf("%+v: invalid selector reported as no match", tc.opts)
+			t.Errorf("%+v: rejected selector reported as no match", tc.opts)
 		}
 	}
 	// Valid selectors still match, the group and the exclude included.

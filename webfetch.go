@@ -82,7 +82,8 @@ const (
 	errNoSelector    = "<error>No content matched the selector.</error>" // own, for Selector
 )
 
-// Own sentinels for an unparseable Selector / ExcludeSelectors entry: the
+// Own sentinels for a Selector / ExcludeSelectors entry the CSS parser
+// rejects (bad syntax, or valid CSS it doesn't support): the
 // (normalized) selector, as is (Go quoting would double CSS backslashes), and
 // the CSS parser's message.
 const (
