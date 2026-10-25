@@ -252,6 +252,14 @@ func TestFetch_EscapeHatch(t *testing.T) {
 	if !strings.Contains(def, "DROPMARKER") {
 		t.Fatalf("precondition: default Readability path should keep the drop paragraph, got:\n%s", def)
 	}
+	// A blank Selector (an untrimmed tool argument) is the default path.
+	blank, err := Fetch(context.Background(), srv.URL+"/p", Options{Selector: " "})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if blank != def {
+		t.Fatalf("blank Selector should match the default output, got:\n%s", blank)
+	}
 	excl, err := Fetch(context.Background(), srv.URL+"/p", Options{ExcludeSelectors: []string{".drop"}})
 	if err != nil {
 		t.Fatalf("Fetch error: %v", err)
@@ -892,6 +900,73 @@ func TestExtract_SelectorNormalizedOneForm(t *testing.T) {
 	}
 	if out := extractContentFromHTML(page, nil, Options{ExcludeSelectors: []string{sel}}); !strings.Contains(out, "KEEP Coop") || strings.Contains(out, "OTHER") {
 		t.Errorf("negated ExcludeSelectors: want only KEEP Coop, got:\n%q", out)
+	}
+}
+
+func TestExtract_SelectorWhitespace(t *testing.T) {
+	// No-break space (not CSS whitespace, part of a name) and soft hyphen.
+	nbsp, shy := string(rune(0xA0)), string(rune(0xAD))
+	page := `<!doctype html><html><body>
+		<p id="a">AAA</p>
+		<p id="s ">SSS</p>
+		<p id="a&nbsp;">NBSP</p>
+		<p>OTHER</p>
+		</body></html>`
+	full := extractContentFromHTML(page, nil, Options{FullPage: true})
+	// Blank Selector is unset: FullPage applies as if it were "".
+	if out := extractContentFromHTML(page, nil, Options{FullPage: true, Selector: " \t\r\f"}); out != full {
+		t.Errorf("blank Selector with FullPage: want FullPage output, got:\n%q", out)
+	}
+	// Selectors reach the CSS parser as given: it skips CSS-whitespace
+	// padding, an escaped trailing space and a no-break space are part of the id.
+	for sel, want := range map[string]string{
+		" #a\n": "AAA", "#s\\ ": "SSS", " #a , #s\\  ": "AAA\n\nSSS", "#a" + nbsp: "NBSP",
+	} {
+		if out := extractContentFromHTML(page, nil, Options{Selector: sel}); out != want {
+			t.Errorf("Selector %q: want %q, got %q", sel, want, out)
+		}
+		out := extractContentFromHTML(page, nil, Options{FullPage: true, ExcludeSelectors: []string{sel}})
+		for _, w := range strings.Split(want, "\n\n") {
+			if strings.Contains(out, w) || !strings.Contains(out, "OTHER") {
+				t.Errorf("ExcludeSelectors %q: want %q removed, got:\n%q", sel, w, out)
+			}
+		}
+	}
+	// Blank entries are dropped, blank after normalizing (soft hyphen) too.
+	if out := extractContentFromHTML(page, nil, Options{FullPage: true, ExcludeSelectors: []string{"", " ", "\n", shy}}); out != full {
+		t.Errorf("blank ExcludeSelectors: want FullPage output, got:\n%q", out)
+	}
+	if out := extractContentFromHTML(page, nil, Options{FullPage: true, Selector: " " + shy + " "}); out != full {
+		t.Errorf("soft-hyphen Selector: want FullPage output, got:\n%q", out)
+	}
+}
+
+func TestCleanSelector(t *testing.T) {
+	// Soft hyphen, no-break space, ideographic space.
+	shy, nbsp, ideo := string(rune(0xAD)), string(rune(0xA0)), string(rune(0x3000))
+	for in, want := range map[string]string{
+		"":                "",
+		" \t\n\r\f\v":     "",
+		nbsp + ideo:       "",
+		" " + shy + " ":   "",
+		" #a ":            " #a ",
+		"#a\\ ":           "#a\\ ",
+		"#a" + nbsp:       "#a" + nbsp,
+		"Co" + shy + "op": "Coop",
+	} {
+		if got := cleanSelector(in); got != want {
+			t.Errorf("cleanSelector(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// A blank-only list becomes nil, so the default path runs, not the
+	// ExcludeSelectors one.
+	o := Options{Selector: nbsp, ExcludeSelectors: []string{" ", shy}}.cleanSelectors()
+	if o.Selector != "" || o.ExcludeSelectors != nil {
+		t.Errorf("cleanSelectors: want blanks unset, got %+v", o)
+	}
+	o = Options{ExcludeSelectors: []string{" ", ".ad", "\n"}}.cleanSelectors()
+	if len(o.ExcludeSelectors) != 1 || o.ExcludeSelectors[0] != ".ad" {
+		t.Errorf("cleanSelectors: want only .ad, got %q", o.ExcludeSelectors)
 	}
 }
 

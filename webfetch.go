@@ -139,13 +139,15 @@ type Options struct {
 	// IncludeMetadata is not applied on this path; text is normalized as with
 	// FullPage. If nothing matches, the content is the
 	// "<error>No content matched the selector.</error>" sentinel (with a nil
-	// error). Default "".
+	// error). A blank Selector (whitespace only once normalized) counts as
+	// unset; others go to the CSS parser as given. Default "".
 	Selector string
 	// ExcludeSelectors removes element(s) matching these CSS selectors before
 	// conversion. Unlike FullPage/Selector it composes with every non-raw mode,
 	// including the default Readability path (e.g. strip a cookie banner, then
 	// simplify). Empty (the default) leaves the input untouched, so output stays
-	// byte-identical to upstream. Ignored when Raw is set. The selectors are
+	// byte-identical to upstream. Ignored when Raw is set. Blank entries are
+	// dropped (as Selector), others used as given. The selectors are
 	// normalized (NFC, soft hyphens removed) on every mode, the Readability path
 	// included. A backslash-escaped soft hyphen is not normalized like a literal
 	// one: \AD matches only text the page writes as &shy;, and \ before a
@@ -399,6 +401,8 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 		article readability.Article
 		err     error
 	)
+	// Blank selectors must not leave the default path.
+	opts = opts.cleanSelectors()
 	// Escape-hatch pre-pass. ExcludeSelectors composes with every mode (including
 	// the default Readability path); Selector / FullPage skip Readability. When
 	// none are set this block is skipped entirely and the output is byte-identical
@@ -417,9 +421,7 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 			return errSimplify
 		}
 		for _, sel := range opts.ExcludeSelectors {
-			if sel = strings.TrimSpace(sel); sel != "" {
-				doc.Find(normalizeText(sel)).Remove()
-			}
+			doc.Find(sel).Remove()
 		}
 		if skipReadability {
 			// Readability absolutizes links and drops javascript: links
@@ -452,6 +454,31 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 		}
 	}
 	return markdown
+}
+
+// cleanSelectors normalizes Selector and ExcludeSelectors like the tree
+// (normalizeText), unsets a blank Selector and drops blank ExcludeSelectors.
+// Blank is empty or whitespace only (unicode.IsSpace) after normalizing: no
+// such selector can match. Others are kept as is: cascadia skips CSS
+// whitespace padding itself, and trimming would break an escaped trailing
+// space ("#a\ ") or a no-break space, which is part of a CSS name.
+func (o Options) cleanSelectors() Options {
+	o.Selector = cleanSelector(o.Selector)
+	var excl []string
+	for _, sel := range o.ExcludeSelectors {
+		if sel = cleanSelector(sel); sel != "" {
+			excl = append(excl, sel)
+		}
+	}
+	o.ExcludeSelectors = excl
+	return o
+}
+
+func cleanSelector(sel string) string {
+	if sel = normalizeText(sel); strings.TrimSpace(sel) == "" {
+		return ""
+	}
+	return sel
 }
 
 // isNormalText reports whether readability.NormalizeText would leave s as

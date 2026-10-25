@@ -137,7 +137,9 @@ on the `FullPage` / `Selector` paths. Relative links are resolved against the
 final URL (after redirects), keeping the page's scheme and directory, as on the
 Readability path. Text is normalized as on the Readability path (NFC, soft
 hyphens removed) and selectors with it; text the page writes as a reference
-(`&shy;`, `&#x301;`) stays as written. With all of them unset (the default),
+(`&shy;`, `&#x301;`) stays as written. A blank (whitespace only once normalized)
+`Selector` or `ExcludeSelectors` entry counts as unset; others go to the CSS
+parser as given. With all of them unset (the default),
 output is byte-identical to upstream.
 
 ### Body cap: `MaxBodyBytes` (10 MiB by default)
