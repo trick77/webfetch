@@ -148,8 +148,8 @@ type Options struct {
 	// byte-identical to upstream. Ignored when Raw is set. The selectors are
 	// normalized (NFC, soft hyphens removed) on every mode, the Readability path
 	// included. A backslash-escaped soft hyphen is not normalized like a literal
-	// one: with \AD the selector matches nothing and the content stays in; with
-	// \ before a literal one the backslash escapes the next character instead.
+	// one: \AD matches only text the page writes as &shy;, and \ before a
+	// literal one escapes the next character instead.
 	ExcludeSelectors []string
 }
 
@@ -455,9 +455,10 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 }
 
 // isNormalText reports whether readability.NormalizeText would leave s as
-// is: it is NFC and has no soft hyphen (almost every page).
+// is: it is valid UTF-8 (the transform turns invalid bytes into U+FFFD), NFC and
+// has no soft hyphen (almost every page).
 func isNormalText(s string) bool {
-	return norm.NFC.IsNormalString(s) && !strings.ContainsRune(s, 0xAD)
+	return utf8.ValidString(s) && norm.NFC.IsNormalString(s) && !strings.ContainsRune(s, 0xAD)
 }
 
 // normalizeText applies readability.NormalizeText to s, without the copy when

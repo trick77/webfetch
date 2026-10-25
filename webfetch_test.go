@@ -902,6 +902,8 @@ func TestNormalizeText(t *testing.T) {
 		"cafe\u0301 co\u00adop": "caf\u00e9 coop",
 		"\u00ad":                "",
 		"\u00e9\u0301 co\u00ad": "\u00e9\u0301 co",
+		"a\xffb":                "a\ufffdb",
+		"a\xff\u00adb":          "a\ufffdb",
 	} {
 		if got := normalizeText(in); got != want {
 			t.Errorf("normalizeText(%q) = %q, want %q", in, got, want)
