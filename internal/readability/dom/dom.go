@@ -1,7 +1,8 @@
 // Package dom is the subset of github.com/go-shiori/dom
 // (v0.0.0-20230515143342-73569d674e1c, MIT, see LICENSE) that readability
 // uses: DOM-style helpers over golang.org/x/net/html. Function bodies are
-// unchanged; unused helpers and the chardet-based Parse are dropped.
+// unchanged, except that ReplaceChild returns on a nil parent instead of
+// panicking; unused helpers and the chardet-based Parse are dropped.
 package dom
 
 import (
@@ -158,22 +159,6 @@ func TextContent(node *html.Node) string {
 	return buffer.String()
 }
 
-// OuterHTML returns an HTML serialization of the element and its descendants.
-// The returned HTML value is escaped.
-func OuterHTML(node *html.Node) string {
-	if node == nil {
-		return ""
-	}
-
-	var buffer bytes.Buffer
-	err := html.Render(&buffer, node)
-	if err != nil {
-		return ""
-	}
-
-	return buffer.String()
-}
-
 // InnerHTML returns the HTML content (inner HTML) of an element.
 // The returned HTML value is escaped.
 func InnerHTML(node *html.Node) string {
@@ -298,8 +283,9 @@ func AppendChild(node *html.Node, child *html.Node) {
 //
 // TODO: I'm note sure but I *think* there are some issues here. Check later I guess.
 func ReplaceChild(parent *html.Node, newChild *html.Node, oldChild *html.Node) (*html.Node, *html.Node) {
-	// Make sure parent is specified and not void
-	if parent == nil && !IsVoidElement(parent) {
+	// Make sure parent is specified. Upstream's "parent == nil &&
+	// !IsVoidElement(parent)" panicked on nil and never checked void.
+	if parent == nil {
 		return newChild, oldChild
 	}
 
