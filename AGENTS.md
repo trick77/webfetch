@@ -3,7 +3,7 @@
 ## What this is
 
 `webfetch` (`github.com/trick77/webfetch`) is a dependency-light Go **library** —
-a single package at the repo root, no CLI and no server binary. It ports the
+one public package at the repo root, no CLI and no server binary. It ports the
 Python `mcp-server-fetch`. Callers use it in-process:
 `webfetch.Fetch(ctx, url, webfetch.Options{...})`.
 
@@ -15,6 +15,12 @@ webfetch guards the download (SSRF, size caps), not every parser threat. PDFs
 are not parsed here: `PDFHandler` hands the bytes to the caller, who isolates
 the parser. Don't add an in-process PDF parser back (a bomb can't be bounded,
 #30).
+
+`internal/readability` is a trimmed copy of go-readability v2.1.3 (deltas in its
+package doc), vendored to shed dateparse/chardet/go-shiori deps. Don't rewrite
+the extraction algorithm; port upstream fixes by hand. `testdata/readability`
+goldens were made by the original library: a diff there is a regression, not a
+golden to regenerate.
 
 ## Commands
 
