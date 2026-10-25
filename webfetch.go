@@ -44,7 +44,6 @@ import (
 
 	md "github.com/JohannesKaufmann/html-to-markdown"
 	"github.com/PuerkitoBio/goquery"
-	"github.com/andybalholm/cascadia"
 	"github.com/trick77/webfetch/internal/readability"
 	"golang.org/x/net/html/charset"
 	"golang.org/x/text/unicode/norm"
@@ -130,7 +129,9 @@ type Options struct {
 	// tables, sidebars you actually want). Ignored when Selector is set, and when
 	// Raw is set. IncludeMetadata is not applied on this path. The text is
 	// normalized as on the Readability path (NFC, soft hyphens removed), and
-	// Selector / ExcludeSelectors match the normalized text. Default false.
+	// Selector / ExcludeSelectors are normalized to match it; text the page
+	// writes as a reference (&shy;, &#x301;) stays as written, so a selector
+	// with NFD / soft-hyphen text does not match it. Default false.
 	FullPage bool
 	// Selector, when set, converts only the element(s) matching this CSS selector
 	// to Markdown, skipping Readability (an escape hatch for targeting a specific
@@ -413,7 +414,7 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 		}
 		for _, sel := range opts.ExcludeSelectors {
 			if sel = strings.TrimSpace(sel); sel != "" {
-				doc.FindMatcher(selectorMatcher(sel)).Remove()
+				doc.Find(normalizeText(sel)).Remove()
 			}
 		}
 		if skipReadability {
@@ -468,38 +469,17 @@ func normalizeText(s string) string {
 	return string(b)
 }
 
-// selectorMatcher compiles sel for a tree built from normalizeText'd HTML: it
-// matches sel normalized the same way, so NFD / soft-hyphen text in it still
-// matches literal text, or sel itself. The page was normalized as raw bytes,
-// so text written as a reference (&shy;, &#x301;) is decoded only by the
-// parser and stays unnormalized in the tree; the original selector still
-// matches that. One group matches either form in a single pass, in document
-// order. An invalid sel matches nothing, as with goquery's Find; an invalid
-// normalized form (an escape whose target was removed) is skipped.
-func selectorMatcher(sel string) goquery.Matcher {
-	g, err := cascadia.ParseGroup(sel)
-	if err != nil {
-		return cascadia.Selector(cascadia.SelectorGroup(nil).Match)
-	}
-	if n := normalizeText(sel); n != sel {
-		if ng, err := cascadia.ParseGroup(n); err == nil {
-			g = append(ng, g...)
-		}
-	}
-	return cascadia.Selector(g.Match)
-}
-
 // selectorMarkdown converts a subtree (Selector) or the whole body (FullPage) of
 // an already-normalized, pruned, link-absolutized document to Markdown,
 // skipping Readability.
 func selectorMarkdown(doc *goquery.Document, opts Options) string {
 	var fragment string
 	if opts.Selector != "" {
-		m := selectorMatcher(opts.Selector)
-		sel := doc.FindMatcher(m)
+		q := normalizeText(opts.Selector)
+		sel := doc.Find(q)
 		// A match nested inside another match is already part of the outer
 		// one's HTML; keep only the outermost so nothing is emitted twice.
-		sel = sel.NotSelection(sel.FindMatcher(m))
+		sel = sel.NotSelection(sel.Find(q))
 		if sel.Length() == 0 {
 			return errNoSelector
 		}

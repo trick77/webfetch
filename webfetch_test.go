@@ -843,64 +843,52 @@ func TestExtract_SelectorFullPageNormalized(t *testing.T) {
 
 func TestExtract_SelectorNormalized(t *testing.T) {
 	// The tree is normalized, so the selector is too: NFD / soft-hyphen text
-	// in it still matches, whether the page has the literal characters
-	// (normalized in the tree) or references (left as is by the parser).
-	pages := map[string][2]string{
-		"literal":   {"cafe\u0301", "Co\u00adop"},
-		"reference": {"cafe&#x301;", "Co&shy;op"},
-	}
-	sels := map[string]string{
+	// in it still matches the page's literal (now normalized) characters.
+	page := `<!doctype html><html><body>
+		<p title="cafe` + "\u0301" + `">NFDMATCH</p>
+		<p>SHYMATCH Co` + "\u00ad" + `op</p>
+		<p>OTHER</p>
+		</body></html>`
+	for sel, want := range map[string]string{
 		`p[title="cafe` + "\u0301" + `"]`:    "NFDMATCH",
 		`p:contains("Co` + "\u00ad" + `op")`: "SHYMATCH",
-	}
-	for name, p := range pages {
-		page := `<!doctype html><html><body>
-			<p title="` + p[0] + `">NFDMATCH</p>
-			<p>SHYMATCH ` + p[1] + `</p>
-			<p>OTHER</p>
-			</body></html>`
-		for sel, want := range sels {
-			out := extractContentFromHTML(page, nil, Options{Selector: sel})
-			if !strings.Contains(out, want) || strings.Contains(out, "OTHER") {
-				t.Errorf("%s: Selector %q: unexpected result:\n%s", name, sel, out)
-			}
-			out = extractContentFromHTML(page, nil, Options{FullPage: true, ExcludeSelectors: []string{sel}})
-			if strings.Contains(out, want) || !strings.Contains(out, "OTHER") {
-				t.Errorf("%s: ExcludeSelectors %q: unexpected result:\n%s", name, sel, out)
-			}
+	} {
+		out := extractContentFromHTML(page, nil, Options{Selector: sel})
+		if !strings.Contains(out, want) || strings.Contains(out, "OTHER") {
+			t.Errorf("Selector %q: unexpected result:\n%s", sel, out)
+		}
+		out = extractContentFromHTML(page, nil, Options{FullPage: true, ExcludeSelectors: []string{sel}})
+		if strings.Contains(out, want) || !strings.Contains(out, "OTHER") {
+			t.Errorf("ExcludeSelectors %q: unexpected result:\n%s", sel, out)
 		}
 	}
 }
 
-func TestExtract_SelectorNormalizedMixed(t *testing.T) {
-	// One page with the text written both literally and as a reference: each
-	// selector form matches one element, and both come back in document order.
+func TestExtract_SelectorNormalizedOneForm(t *testing.T) {
+	// Only the normalized selector is matched: text written as a reference
+	// stays unnormalized in the tree and is not matched.
 	page := `<!doctype html><html><body>
 		<p title="cafe` + "\u0301" + `">LIT1</p>
 		<p title="cafe&#x301;">REF2</p>
 		<p title="cafe` + "\u0301" + `">LIT3</p>
-		<p>OTHER</p>
 		</body></html>`
 	sel := `p[title="cafe` + "\u0301" + `"]`
-	out := extractContentFromHTML(page, nil, Options{Selector: sel})
-	if out != "LIT1\n\nREF2\n\nLIT3" {
-		t.Errorf("Selector: want all three in order, got:\n%q", out)
+	if out := extractContentFromHTML(page, nil, Options{Selector: sel}); out != "LIT1\n\nLIT3" {
+		t.Errorf("Selector: want LIT1, LIT3, got:\n%q", out)
 	}
-	out = extractContentFromHTML(page, nil, Options{FullPage: true, ExcludeSelectors: []string{sel}})
-	if out != "OTHER" {
-		t.Errorf("ExcludeSelectors: want only OTHER, got:\n%q", out)
+	// Matching the original form too would invert a negation: "Coop" passes
+	// :not(:contains("Co\u00adop")).
+	page = `<!doctype html><html><body><article>
+		<p>KEEP Co` + "\u00ad" + `op</p>
+		<p title="cafe` + "\u0301" + `">KEEP2</p>
+		<p>OTHER</p>
+		</article></body></html>`
+	sel = `p:not(:contains("Co` + "\u00ad" + `op"))`
+	if out := extractContentFromHTML(page, nil, Options{Selector: sel}); out != "KEEP2\n\nOTHER" {
+		t.Errorf("negated Selector: want KEEP2, OTHER, got:\n%q", out)
 	}
-	// An invalid selector matches nothing, as with goquery's Find.
-	bad := `p[title="cafe` + "\u0301"
-	if out := extractContentFromHTML(page, nil, Options{Selector: bad}); out != errNoSelector {
-		t.Errorf("invalid Selector: want errNoSelector, got:\n%q", out)
-	}
-	// A valid selector whose normalized form is not (the soft hyphen its escape
-	// targets is removed) still matches by the original form.
-	esc := `p[title=a\` + "\u00ad" + `]`
-	page = `<!doctype html><html><body><p title="a&shy;">ESC</p><p>OTHER</p></body></html>`
-	if out := extractContentFromHTML(page, nil, Options{Selector: esc}); out != "ESC" {
-		t.Errorf("Selector %q: want ESC, got:\n%q", esc, out)
+	if out := extractContentFromHTML(page, nil, Options{ExcludeSelectors: []string{sel}}); !strings.Contains(out, "KEEP Coop") || strings.Contains(out, "OTHER") {
+		t.Errorf("negated ExcludeSelectors: want only KEEP Coop, got:\n%q", out)
 	}
 }
 
