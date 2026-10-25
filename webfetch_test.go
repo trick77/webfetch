@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/andybalholm/cascadia"
 	"github.com/trick77/webfetch/internal/readability"
 	"golang.org/x/text/unicode/norm"
 )
@@ -337,15 +338,20 @@ func TestExtract_InvalidSelector(t *testing.T) {
 	}
 }
 
-func TestCompileSelectors(t *testing.T) {
-	// Unset selectors compile to nothing, so selectorMarkdown runs FullPage.
-	cs, bad := compileSelectors(Options{})
-	if bad != "" || cs.sel != nil || cs.exclude != nil {
-		t.Errorf("unset: want zero value, got %+v, %q", cs, bad)
+func TestSelectorReason(t *testing.T) {
+	// Leftover input: cascadia's message repeats the selector Go-quoted
+	// (doubled backslashes); the sentinel shows it once, as written.
+	sel := `#a\ b)`
+	_, err := cascadia.Compile(sel)
+	if err == nil {
+		t.Fatal("precondition: want a parse error")
 	}
-	cs, bad = compileSelectors(Options{Selector: "p", ExcludeSelectors: []string{".a", ".b"}})
-	if bad != "" || cs.sel == nil || len(cs.exclude) != 2 {
-		t.Errorf("valid: want 1 + 2 matchers, got %+v, %q", cs, bad)
+	if got := selectorReason(sel, err); strings.Contains(got, "parsing") || strings.Contains(got, `\\`) || got == "" {
+		t.Errorf("selectorReason(%q) = %q, want the message without the quoted selector", sel, got)
+	}
+	// Other messages pass through.
+	if got := selectorReason("x", errors.New("expected identifier")); got != "expected identifier" {
+		t.Errorf("selectorReason: got %q", got)
 	}
 }
 

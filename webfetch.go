@@ -149,19 +149,21 @@ type Options struct {
 	// FullPage. If nothing matches, the content is the
 	// "<error>No content matched the selector.</error>" sentinel (with a nil
 	// error). A blank Selector (whitespace only once normalized) counts as
-	// unset; others go to the CSS parser as given. One the parser rejects
-	// (any member of a group) yields "<error>Invalid selector "<sel>": <reason>.</error>"
-	// instead, also with a nil error. Default "".
+	// unset; others go to the CSS parser as given. On an HTML page, one the
+	// parser rejects (any member of a group) yields
+	// "<error>Invalid selector "<sel>": <reason>.</error>" instead, also with
+	// a nil error. Default "".
 	Selector string
 	// ExcludeSelectors removes element(s) matching these CSS selectors before
 	// conversion. Unlike FullPage/Selector it composes with every non-raw mode,
 	// including the default Readability path (e.g. strip a cookie banner, then
 	// simplify). Empty (the default) leaves the input untouched, so output stays
 	// byte-identical to upstream. Ignored when Raw is set. Blank entries are
-	// dropped (as Selector), others used as given. An entry the parser rejects
-	// fails the extraction rather than keep what it should drop: the content
-	// is only "<error>Invalid exclude selector "<sel>": <reason>.</error>"
-	// (with a nil error). The selectors are
+	// dropped (as Selector), others used as given. On an HTML page, an entry
+	// the parser rejects fails the extraction rather than keep what it should
+	// drop: the content is only
+	// "<error>Invalid exclude selector "<sel>": <reason>.</error>" (with a nil
+	// error). The selectors are
 	// normalized (NFC, soft hyphens removed) on every mode, the Readability path
 	// included. A backslash-escaped soft hyphen is not normalized like a literal
 	// one: \AD matches only text the page writes as &shy;, and \ before a
@@ -515,18 +517,24 @@ func compileSelectors(o Options) (cs compiledSelectors, bad string) {
 	for _, s := range o.ExcludeSelectors {
 		m, err := cascadia.Compile(s)
 		if err != nil {
-			return compiledSelectors{}, fmt.Sprintf(errBadExcludeSelector, s, err)
+			return compiledSelectors{}, fmt.Sprintf(errBadExcludeSelector, s, selectorReason(s, err))
 		}
 		cs.exclude = append(cs.exclude, m)
 	}
 	if o.Selector != "" {
 		m, err := cascadia.Compile(o.Selector)
 		if err != nil {
-			return compiledSelectors{}, fmt.Sprintf(errBadSelector, o.Selector, err)
+			return compiledSelectors{}, fmt.Sprintf(errBadSelector, o.Selector, selectorReason(o.Selector, err))
 		}
 		cs.sel = m
 	}
 	return cs, ""
+}
+
+// selectorReason is cascadia's message for sel, minus the Go-quoted copy of
+// sel it prefixes to "N bytes left over": the sentinel shows sel already.
+func selectorReason(sel string, err error) string {
+	return strings.TrimPrefix(err.Error(), fmt.Sprintf("parsing %q: ", sel))
 }
 
 // isNormalText reports whether readability.NormalizeText would leave s as
