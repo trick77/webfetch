@@ -903,24 +903,24 @@ func TestExtract_SelectorNormalizedOneForm(t *testing.T) {
 	}
 }
 
-// No-break space (not CSS whitespace) and soft hyphen.
-var nbsp, shy = string(rune(0xA0)), string(rune(0xAD))
-
 func TestExtract_SelectorWhitespace(t *testing.T) {
+	// No-break space (not CSS whitespace, part of a name) and soft hyphen.
+	nbsp, shy := string(rune(0xA0)), string(rune(0xAD))
 	page := `<!doctype html><html><body>
 		<p id="a">AAA</p>
 		<p id="s ">SSS</p>
+		<p id="a&nbsp;">NBSP</p>
 		<p>OTHER</p>
 		</body></html>`
 	full := extractContentFromHTML(page, nil, Options{FullPage: true})
 	// Blank Selector is unset: FullPage applies as if it were "".
-	if out := extractContentFromHTML(page, nil, Options{FullPage: true, Selector: " \t"}); out != full {
+	if out := extractContentFromHTML(page, nil, Options{FullPage: true, Selector: " \t\r\f"}); out != full {
 		t.Errorf("blank Selector with FullPage: want FullPage output, got:\n%q", out)
 	}
-	// Padding is trimmed (non-CSS whitespace too); a trailing escaped space is
-	// part of the id.
+	// Selectors reach the CSS parser as given: it skips CSS-whitespace
+	// padding, an escaped trailing space and a no-break space are part of the id.
 	for sel, want := range map[string]string{
-		" #a\n": "AAA", nbsp + "#a\v": "AAA", "#s\\ ": "SSS", " #a , #s\\  ": "AAA\n\nSSS",
+		" #a\n": "AAA", "#s\\ ": "SSS", " #a , #s\\  ": "AAA\n\nSSS", "#a" + nbsp: "NBSP",
 	} {
 		if out := extractContentFromHTML(page, nil, Options{Selector: sel}); out != want {
 			t.Errorf("Selector %q: want %q, got %q", sel, want, out)
@@ -942,16 +942,14 @@ func TestExtract_SelectorWhitespace(t *testing.T) {
 }
 
 func TestCleanSelector(t *testing.T) {
+	shy := string(rune(0xAD))
 	for in, want := range map[string]string{
-		"":                  "",
-		" \t\n":             "",
-		nbsp + "\v":         "",
-		" #a ":              "#a",
-		"#a\\ ":             "#a\\ ",
-		"#a\\" + nbsp + " ": "#a\\" + nbsp,
-		"#a\\\\ ":           "#a\\\\",
-		"\\":                "\\",
-		"Co" + shy + "op":   "Coop",
+		"":                "",
+		" \t\n\r\f":       "",
+		" " + shy + " ":   "",
+		" #a ":            " #a ",
+		"#a\\ ":           "#a\\ ",
+		"Co" + shy + "op": "Coop",
 	} {
 		if got := cleanSelector(in); got != want {
 			t.Errorf("cleanSelector(%q) = %q, want %q", in, got, want)
