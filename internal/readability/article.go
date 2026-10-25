@@ -109,6 +109,7 @@ var timeLayouts = []string{
 	"Mon, 2 Jan 2006 15:04 -0700",
 	"Mon, 2 Jan 2006 15:04 MST",
 	time.RFC850,
+	"Monday, 02-Jan-2006 15:04:05 MST", // RFC 850 with a four-digit year
 	time.RFC822Z,
 	time.RFC822,
 	time.ANSIC,
