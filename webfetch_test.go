@@ -903,6 +903,9 @@ func TestExtract_SelectorNormalizedOneForm(t *testing.T) {
 	}
 }
 
+// No-break space (not CSS whitespace) and soft hyphen.
+var nbsp, shy = string(rune(0xA0)), string(rune(0xAD))
+
 func TestExtract_SelectorWhitespace(t *testing.T) {
 	page := `<!doctype html><html><body>
 		<p id="a">AAA</p>
@@ -914,18 +917,45 @@ func TestExtract_SelectorWhitespace(t *testing.T) {
 	if out := extractContentFromHTML(page, nil, Options{FullPage: true, Selector: " \t"}); out != full {
 		t.Errorf("blank Selector with FullPage: want FullPage output, got:\n%q", out)
 	}
-	// Padding is insignificant; a trailing escaped space is part of the id.
-	for sel, want := range map[string]string{" #a\n": "AAA", "#s\\ ": "SSS", " #a , #s\\  ": "AAA\n\nSSS"} {
+	// Padding is trimmed (non-CSS whitespace too); a trailing escaped space is
+	// part of the id.
+	for sel, want := range map[string]string{
+		" #a\n": "AAA", nbsp + "#a\v": "AAA", "#s\\ ": "SSS", " #a , #s\\  ": "AAA\n\nSSS",
+	} {
 		if out := extractContentFromHTML(page, nil, Options{Selector: sel}); out != want {
 			t.Errorf("Selector %q: want %q, got %q", sel, want, out)
 		}
+		out := extractContentFromHTML(page, nil, Options{FullPage: true, ExcludeSelectors: []string{sel}})
+		for _, w := range strings.Split(want, "\n\n") {
+			if strings.Contains(out, w) || !strings.Contains(out, "OTHER") {
+				t.Errorf("ExcludeSelectors %q: want %q removed, got:\n%q", sel, w, out)
+			}
+		}
 	}
-	// Blank ExcludeSelectors entries are skipped; others are used as given.
-	if out := extractContentFromHTML(page, nil, Options{FullPage: true, ExcludeSelectors: []string{"", " ", "\n"}}); out != full {
+	// Blank entries are dropped, blank after normalizing (soft hyphen) too.
+	if out := extractContentFromHTML(page, nil, Options{FullPage: true, ExcludeSelectors: []string{"", " ", "\n", shy}}); out != full {
 		t.Errorf("blank ExcludeSelectors: want FullPage output, got:\n%q", out)
 	}
-	if out := extractContentFromHTML(page, nil, Options{FullPage: true, ExcludeSelectors: []string{" ", "#s\\ "}}); strings.Contains(out, "SSS") || !strings.Contains(out, "AAA") {
-		t.Errorf("ExcludeSelectors escaped space: want SSS removed, got:\n%q", out)
+	if out := extractContentFromHTML(page, nil, Options{FullPage: true, Selector: " " + shy + " "}); out != full {
+		t.Errorf("soft-hyphen Selector: want FullPage output, got:\n%q", out)
+	}
+}
+
+func TestCleanSelector(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                  "",
+		" \t\n":             "",
+		nbsp + "\v":         "",
+		" #a ":              "#a",
+		"#a\\ ":             "#a\\ ",
+		"#a\\" + nbsp + " ": "#a\\" + nbsp,
+		"#a\\\\ ":           "#a\\\\",
+		"\\":                "\\",
+		"Co" + shy + "op":   "Coop",
+	} {
+		if got := cleanSelector(in); got != want {
+			t.Errorf("cleanSelector(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

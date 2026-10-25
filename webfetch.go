@@ -40,6 +40,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	md "github.com/JohannesKaufmann/html-to-markdown"
@@ -139,15 +140,15 @@ type Options struct {
 	// IncludeMetadata is not applied on this path; text is normalized as with
 	// FullPage. If nothing matches, the content is the
 	// "<error>No content matched the selector.</error>" sentinel (with a nil
-	// error). A blank (whitespace-only) Selector counts as unset; surrounding
-	// whitespace is otherwise left to the CSS parser. Default "".
+	// error). Surrounding whitespace (unicode.IsSpace) is trimmed, except a
+	// backslash-escaped trailing one; a blank Selector counts as unset. Default "".
 	Selector string
 	// ExcludeSelectors removes element(s) matching these CSS selectors before
 	// conversion. Unlike FullPage/Selector it composes with every non-raw mode,
 	// including the default Readability path (e.g. strip a cookie banner, then
 	// simplify). Empty (the default) leaves the input untouched, so output stays
-	// byte-identical to upstream. Ignored when Raw is set. Blank entries are
-	// skipped, others are used as given (as Selector). The selectors are
+	// byte-identical to upstream. Ignored when Raw is set. Entries are trimmed
+	// as Selector; blank ones are dropped. The selectors are
 	// normalized (NFC, soft hyphens removed) on every mode, the Readability path
 	// included. A backslash-escaped soft hyphen is not normalized like a literal
 	// one: \AD matches only text the page writes as &shy;, and \ before a
@@ -401,12 +402,17 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 		article readability.Article
 		err     error
 	)
-	// A blank Selector matches nothing (cascadia rejects it); treat it as unset.
-	// Non-blank ones are passed as is: the CSS parser skips the padding, and
-	// trimming would break a trailing escaped space ("#a\ ").
-	if isBlank(opts.Selector) {
-		opts.Selector = ""
+	// Selectors are normalized like the tree and trimmed; a blank Selector is
+	// unset and blank ExcludeSelectors are dropped, so neither leaves the
+	// default path.
+	opts.Selector = cleanSelector(opts.Selector)
+	var excl []string
+	for _, sel := range opts.ExcludeSelectors {
+		if sel = cleanSelector(sel); sel != "" {
+			excl = append(excl, sel)
+		}
 	}
+	opts.ExcludeSelectors = excl
 	// Escape-hatch pre-pass. ExcludeSelectors composes with every mode (including
 	// the default Readability path); Selector / FullPage skip Readability. When
 	// none are set this block is skipped entirely and the output is byte-identical
@@ -425,9 +431,7 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 			return errSimplify
 		}
 		for _, sel := range opts.ExcludeSelectors {
-			if !isBlank(sel) {
-				doc.Find(normalizeText(sel)).Remove()
-			}
+			doc.Find(sel).Remove()
 		}
 		if skipReadability {
 			// Readability absolutizes links and drops javascript: links
@@ -462,9 +466,16 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 	return markdown
 }
 
-// isBlank reports whether a selector is empty or whitespace only.
-func isBlank(sel string) bool {
-	return strings.TrimSpace(sel) == ""
+// cleanSelector normalizes sel (normalizeText) and trims the whitespace around
+// it, keeping a trailing one a backslash escapes ("#a\ ").
+func cleanSelector(sel string) string {
+	sel = strings.TrimLeftFunc(normalizeText(sel), unicode.IsSpace)
+	t := strings.TrimRightFunc(sel, unicode.IsSpace)
+	if n := len(t) - len(strings.TrimRight(t, `\`)); n%2 == 1 {
+		_, size := utf8.DecodeRuneInString(sel[len(t):])
+		t = sel[:len(t)+size]
+	}
+	return t
 }
 
 // isNormalText reports whether readability.NormalizeText would leave s as
@@ -489,11 +500,11 @@ func normalizeText(s string) string {
 
 // selectorMarkdown converts a subtree (Selector) or the whole body (FullPage) of
 // an already-normalized, pruned, link-absolutized document to Markdown,
-// skipping Readability.
+// skipping Readability. opts.Selector is already cleanSelector'd.
 func selectorMarkdown(doc *goquery.Document, opts Options) string {
 	var fragment string
 	if opts.Selector != "" {
-		q := normalizeText(opts.Selector)
+		q := opts.Selector
 		sel := doc.Find(q)
 		// A match nested inside another match is already part of the outer
 		// one's HTML; keep only the outermost so nothing is emitted twice.
