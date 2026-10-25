@@ -394,29 +394,21 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 	// none are set this block is skipped entirely and the output is byte-identical
 	// to upstream.
 	if len(opts.ExcludeSelectors) > 0 || opts.Selector != "" || opts.FullPage {
-		viaReadability := opts.Selector == "" && !opts.FullPage
-		var src io.Reader = strings.NewReader(page)
-		if viaReadability {
-			// Readability's Parse normalizes the text (NFC, soft hyphens
-			// removed) before parsing; do the same so this path agrees with
-			// the default one.
-			src = readability.NormalizeText(src)
-		}
-		doc, perr := goquery.NewDocumentFromReader(src)
+		// Readability's Parse normalizes the text (NFC, soft hyphens removed)
+		// before parsing; every opt-in mode does the same, so a page reads the
+		// same whichever mode extracts it.
+		doc, perr := goquery.NewDocumentFromReader(readability.NormalizeText(strings.NewReader(page)))
 		if perr != nil {
 			return errSimplify
 		}
 		for _, sel := range opts.ExcludeSelectors {
 			if sel = strings.TrimSpace(sel); sel != "" {
-				if viaReadability {
-					// Normalize the selector like the tree, or NFD / soft-hyphen
-					// text in it would no longer match.
-					sel = normalizeSelector(sel)
-				}
-				doc.Find(sel).Remove()
+				// Normalize the selector like the tree, or NFD / soft-hyphen
+				// text in it would no longer match.
+				doc.Find(normalizeSelector(sel)).Remove()
 			}
 		}
-		if !viaReadability {
+		if opts.Selector != "" || opts.FullPage {
 			// Readability absolutizes links and drops javascript: links
 			// itself; do the same here so both paths agree (the latter in
 			// selectorMarkdown, after matching).
@@ -459,15 +451,18 @@ func normalizeSelector(sel string) string {
 }
 
 // selectorMarkdown converts a subtree (Selector) or the whole body (FullPage) of
-// an already-pruned, link-absolutized document to Markdown, skipping
-// Readability.
+// an already-normalized, pruned, link-absolutized document to Markdown,
+// skipping Readability.
 func selectorMarkdown(doc *goquery.Document, opts Options) string {
 	var fragment string
 	if opts.Selector != "" {
-		sel := doc.Find(opts.Selector)
+		// The tree is normalized (see extractContentFromHTML); normalize the
+		// selector too, or NFD / soft-hyphen text in it would no longer match.
+		q := normalizeSelector(opts.Selector)
+		sel := doc.Find(q)
 		// A match nested inside another match is already part of the outer
 		// one's HTML; keep only the outermost so nothing is emitted twice.
-		sel = sel.NotSelection(sel.Find(opts.Selector))
+		sel = sel.NotSelection(sel.Find(q))
 		if sel.Length() == 0 {
 			return errNoSelector
 		}

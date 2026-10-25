@@ -11,12 +11,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
 
 	"github.com/PuerkitoBio/goquery"
+	"golang.org/x/text/unicode/norm"
 )
 
 // allowLoopback relaxes the SSRF guard so tests can reach the loopback
@@ -813,6 +815,47 @@ func TestExtract_ExcludeSelectorsNormalized(t *testing.T) {
 	}
 	if !strings.Contains(out, "Caf\u00e9 Coop.") {
 		t.Fatalf("expected NFC text without soft hyphens, got:\n%q", out)
+	}
+}
+
+func TestExtract_SelectorFullPageNormalized(t *testing.T) {
+	// Selector and FullPage normalize like the Readability path: NFC, soft
+	// hyphens removed. The fixture carries literal NFD accents and U+00AD.
+	raw, err := os.ReadFile("testdata/readability/literal-shy-nfd.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(raw)
+	if !strings.Contains(page, "\u00ad") || norm.NFC.IsNormalString(page) {
+		t.Fatal("fixture lost its soft hyphens / NFD text")
+	}
+	for _, opts := range []Options{{Selector: "article"}, {FullPage: true}} {
+		out := extractContentFromHTML(page, nil, opts)
+		if strings.Contains(out, "\u00ad") || !norm.NFC.IsNormalString(out) {
+			t.Errorf("%+v: expected NFC text without soft hyphens, got:\n%q", opts, out)
+		}
+		if !strings.Contains(out, "R\u00e9publique") || !strings.Contains(out, "travaux") || !strings.Contains(out, "commer\u00e7ants") {
+			t.Errorf("%+v: normalized words missing:\n%q", opts, out)
+		}
+	}
+}
+
+func TestExtract_SelectorNormalized(t *testing.T) {
+	// The tree is normalized, so the selector is too: NFD / soft-hyphen text
+	// in it still matches.
+	page := `<!doctype html><html><body>
+		<p title="cafe` + "\u0301" + `">NFDMATCH</p>
+		<p>SHYMATCH Co` + "\u00ad" + `op</p>
+		<p>OTHER</p>
+		</body></html>`
+	for sel, want := range map[string]string{
+		`p[title="cafe` + "\u0301" + `"]`:    "NFDMATCH",
+		`p:contains("Co` + "\u00ad" + `op")`: "SHYMATCH",
+	} {
+		out := extractContentFromHTML(page, nil, Options{Selector: sel})
+		if !strings.Contains(out, want) || strings.Contains(out, "OTHER") {
+			t.Errorf("selector %q: unexpected result:\n%s", sel, out)
+		}
 	}
 }
 
