@@ -282,23 +282,23 @@ func TestFetch_EscapeHatch(t *testing.T) {
 		t.Fatalf("expected no-match sentinel, got:\n%s", miss)
 	}
 
-	// An unparseable selector is reported as such, not as a miss (Selector)
+	// A rejected selector is reported as such, not as a miss (Selector)
 	// or ignored (ExcludeSelectors); no page content, nil error.
 	for _, tc := range []struct {
 		opts Options
 		want string
 	}{
-		{Options{Selector: "div["}, `<error>Invalid selector "div[": `},
-		{Options{ExcludeSelectors: []string{`a[href="x\"`}}, `<error>Invalid exclude selector "a[href="x\"": `},
+		{Options{Selector: "div["}, `<error>Unsupported or invalid selector "div[": `},
+		{Options{ExcludeSelectors: []string{`a[href="x\"`}}, `<error>Unsupported or invalid exclude selector "a[href="x\"": `},
 		// The caller's input can't break the one-line <error>…</error>.
-		{Options{Selector: "div\n\r\t\x00["}, `<error>Invalid selector "div    [": `},
-		{Options{Selector: "p</error><x>["}, `<error>Invalid selector "p‹/error›‹x›[": `},
-		{Options{ExcludeSelectors: []string{"#<"}}, `<error>Invalid exclude selector "#‹": `},
-		{Options{Selector: strings.Repeat("a", 300) + "["}, `<error>Invalid selector "` + strings.Repeat("a", 200) + `…": `},
+		{Options{Selector: "div\n\r\t\x00["}, `<error>Unsupported or invalid selector "div    [": `},
+		{Options{Selector: "p</error><x>["}, `<error>Unsupported or invalid selector "p‹/error›‹x›[": `},
+		{Options{ExcludeSelectors: []string{"#<"}}, `<error>Unsupported or invalid exclude selector "#‹": `},
+		{Options{Selector: strings.Repeat("a", 300) + "["}, `<error>Unsupported or invalid selector "` + strings.Repeat("a", 200) + `…": `},
 	} {
 		out, err := Fetch(context.Background(), srv.URL+"/p", tc.opts)
 		if err != nil {
-			t.Fatalf("%+v: invalid selector must not error: %v", tc.opts, err)
+			t.Fatalf("%+v: rejected selector must not error: %v", tc.opts, err)
 		}
 		// The reason is the CSS parser's wording, not pinned here.
 		head := "Contents of " + srv.URL + "/p:\n"
@@ -321,25 +321,27 @@ func TestExtract_InvalidSelector(t *testing.T) {
 		opts Options
 		want string
 	}{
-		{Options{Selector: "div["}, `Invalid selector "div[": `},
-		{Options{Selector: "#"}, `Invalid selector "#": `},
-		{Options{Selector: "::before"}, `Invalid selector "::before": `},
+		{Options{Selector: "div["}, `Unsupported or invalid selector "div[": `},
+		{Options{Selector: "#"}, `Unsupported or invalid selector "#": `},
+		{Options{Selector: "::before"}, `Unsupported or invalid selector "::before": `},
 		// One bad member fails the whole group, though the other would match.
-		{Options{Selector: "article, p["}, `Invalid selector "article, p[": `},
-		{Options{FullPage: true, Selector: "article >"}, `Invalid selector "article ›": `},
+		{Options{Selector: "article, p["}, `Unsupported or invalid selector "article, p[": `},
+		{Options{FullPage: true, Selector: "article >"}, `Unsupported or invalid selector "article ›": `},
+		// Valid CSS cascadia doesn't support gets the same sentinel.
+		{Options{Selector: ":is(article)"}, `Unsupported or invalid selector ":is(article)": `},
 		// Every mode an exclude composes with: Readability, FullPage, Selector.
-		{Options{ExcludeSelectors: []string{"p["}}, `Invalid exclude selector "p[": `},
-		{Options{FullPage: true, ExcludeSelectors: []string{".ad", " ", "p:nope"}}, `Invalid exclude selector "p:nope": `},
-		{Options{Selector: "article", ExcludeSelectors: []string{".ad, p["}}, `Invalid exclude selector ".ad, p[": `},
+		{Options{ExcludeSelectors: []string{"p["}}, `Unsupported or invalid exclude selector "p[": `},
+		{Options{FullPage: true, ExcludeSelectors: []string{".ad", " ", "p:nope"}}, `Unsupported or invalid exclude selector "p:nope": `},
+		{Options{Selector: "article", ExcludeSelectors: []string{".ad, p["}}, `Unsupported or invalid exclude selector ".ad, p[": `},
 		// Excludes are checked first; the selector is the normalized one.
-		{Options{Selector: "p[", ExcludeSelectors: []string{"x" + string(rune(0xAD)) + "["}}, `Invalid exclude selector "x[": `},
+		{Options{Selector: "p[", ExcludeSelectors: []string{"x" + string(rune(0xAD)) + "["}}, `Unsupported or invalid exclude selector "x[": `},
 	} {
 		out := extractContentFromHTML(page, nil, tc.opts)
 		if !strings.HasPrefix(out, "<error>"+tc.want) || !strings.HasSuffix(out, ".</error>") || strings.Contains(out, "KEEP") {
 			t.Errorf("%+v: want %q sentinel only, got:\n%q", tc.opts, tc.want, out)
 		}
 		if out == errNoSelector {
-			t.Errorf("%+v: invalid selector reported as no match", tc.opts)
+			t.Errorf("%+v: rejected selector reported as no match", tc.opts)
 		}
 	}
 	// Valid selectors still match, the group and the exclude included.

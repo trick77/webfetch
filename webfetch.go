@@ -82,12 +82,13 @@ const (
 	errNoSelector    = "<error>No content matched the selector.</error>" // own, for Selector
 )
 
-// Own sentinels for an unparseable Selector / ExcludeSelectors entry: the
+// Own sentinels for a Selector / ExcludeSelectors entry the CSS parser
+// rejects (bad syntax, or valid CSS it doesn't support): the
 // (normalized) selector, as is (Go quoting would double CSS backslashes), and
 // the CSS parser's message.
 const (
-	errBadSelector        = `<error>Invalid selector "%s": %s.</error>`
-	errBadExcludeSelector = `<error>Invalid exclude selector "%s": %s.</error>`
+	errBadSelector        = `<error>Unsupported or invalid selector "%s": %s.</error>`
+	errBadExcludeSelector = `<error>Unsupported or invalid exclude selector "%s": %s.</error>`
 )
 
 // Options mirror the upstream tool's parameters.
@@ -152,9 +153,10 @@ type Options struct {
 	// error). A blank Selector (whitespace only once normalized) counts as
 	// unset; others go to the CSS parser as given. On an HTML page, one the
 	// parser rejects (any member of a group) yields
-	// "<error>Invalid selector "<sel>": <reason>.</error>" instead, also with
-	// a nil error; <sel> and <reason> are shown with control characters as
-	// spaces, < > as ‹ ›, and cut to 200 runes. Default "".
+	// "<error>Unsupported or invalid selector "<sel>": <reason>.</error>"
+	// instead, also with a nil error; <sel> and <reason> are shown with
+	// control characters as spaces, < > as ‹ ›, and cut to 200 runes.
+	// Default "".
 	Selector string
 	// ExcludeSelectors removes element(s) matching these CSS selectors before
 	// conversion. Unlike FullPage/Selector it composes with every non-raw mode,
@@ -164,8 +166,8 @@ type Options struct {
 	// dropped (as Selector), others used as given. On an HTML page, an entry
 	// the parser rejects fails the extraction rather than keep what it should
 	// drop: the content is only
-	// "<error>Invalid exclude selector "<sel>": <reason>.</error>" (with a nil
-	// error), shown as for Selector. The selectors are
+	// "<error>Unsupported or invalid exclude selector "<sel>": <reason>.</error>"
+	// (with a nil error), shown as for Selector. The selectors are
 	// normalized (NFC, soft hyphens removed) on every mode, the Readability path
 	// included. A backslash-escaped soft hyphen is not normalized like a literal
 	// one: \AD matches only text the page writes as &shy;, and \ before a
