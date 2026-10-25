@@ -141,8 +141,8 @@ hyphens removed) and selectors with it; text the page writes as a reference
 `Selector` or `ExcludeSelectors` entry counts as unset; others go to the CSS
 parser as given. On an HTML page (where selectors apply) one it rejects (any
 member of a group) returns, with a nil error, only
-`<error>Invalid selector "<sel>": <reason>.</error>` or
-`<error>Invalid exclude selector "<sel>": <reason>.</error>`, no page content
+`<error>Unsupported or invalid selector "<sel>": <reason>.</error>` or
+`<error>Unsupported or invalid exclude selector "<sel>": <reason>.</error>`, no page content
 (`<sel>` and `<reason>` with control characters as spaces, `<` `>` as `‹` `›`,
 cut to 200 runes).
 With all of them unset (the default),
