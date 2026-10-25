@@ -282,7 +282,7 @@ func TestFetch_EscapeHatch(t *testing.T) {
 		t.Fatalf("expected no-match sentinel, got:\n%s", miss)
 	}
 
-	// An unparseable selector is reported as such, not as a miss (Selector)
+	// A rejected selector is reported as such, not as a miss (Selector)
 	// or ignored (ExcludeSelectors); no page content, nil error.
 	for _, tc := range []struct {
 		opts Options
