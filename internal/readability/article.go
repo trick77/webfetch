@@ -116,7 +116,7 @@ var timeLayouts = []string{
 // value matching no layout is an error, as an unparsable one was before.
 func parseTime(s string) (time.Time, error) {
 	s = strings.TrimSpace(s)
-	if i := strings.Index(s, " ("); i > 0 && strings.HasSuffix(s, ")") {
+	if i := strings.Index(s, " ("); i > 0 && strings.HasSuffix(s, ")") && strings.Contains(s[:i], "GMT") {
 		s = s[:i]
 	}
 	if n, err := strconv.ParseInt(s, 10, 64); err == nil && s[0] != '-' && s[0] != '+' {

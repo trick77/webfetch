@@ -50,6 +50,8 @@ var timeCases = []struct{ in, want string }{
 	{"13:39", ""},
 	{"", ""},
 	{"2006-01-02T15:04:05+00:00Z", ""},
+	// Only a JavaScript "GMT±hhmm (zone)" suffix is cut, not any parenthetical.
+	{"2024-06-25 (Tuesday)", ""},
 	// dateparse accepted these; dropped as rare or ambiguous (day/month
 	// order), so they now read as no published time.
 	{"02.01.2006", ""},
