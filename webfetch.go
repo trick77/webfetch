@@ -82,10 +82,11 @@ const (
 )
 
 // Own sentinels for an unparseable Selector / ExcludeSelectors entry: the
-// (normalized) selector and the CSS parser's message.
+// (normalized) selector, as is (Go quoting would double CSS backslashes), and
+// the CSS parser's message.
 const (
-	errBadSelector        = "<error>Invalid selector %q: %s.</error>"
-	errBadExcludeSelector = "<error>Invalid exclude selector %q: %s.</error>"
+	errBadSelector        = `<error>Invalid selector "%s": %s.</error>`
+	errBadExcludeSelector = `<error>Invalid exclude selector "%s": %s.</error>`
 )
 
 // Options mirror the upstream tool's parameters.
@@ -421,11 +422,11 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 	// none are set this block is skipped entirely and the output is byte-identical
 	// to upstream.
 	if len(opts.ExcludeSelectors) > 0 || opts.Selector != "" || opts.FullPage {
-		skipReadability := opts.Selector != "" || opts.FullPage
 		cs, bad := compileSelectors(opts)
 		if bad != "" {
 			return bad
 		}
+		skipReadability := cs.sel != nil || opts.FullPage
 		// Readability's Parse normalizes the text (NFC, soft hyphens removed)
 		// before parsing; every opt-in mode does the same, so a page reads the
 		// same whichever mode extracts it.

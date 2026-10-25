@@ -287,15 +287,16 @@ func TestFetch_EscapeHatch(t *testing.T) {
 		opts Options
 		want string
 	}{
-		{Options{Selector: "div["}, `<error>Invalid selector "div[": expected identifier, found EOF instead.</error>`},
-		{Options{ExcludeSelectors: []string{"div["}}, `<error>Invalid exclude selector "div[": expected identifier, found EOF instead.</error>`},
+		{Options{Selector: "div["}, `<error>Invalid selector "div[": `},
+		{Options{ExcludeSelectors: []string{`a[href="x\"`}}, `<error>Invalid exclude selector "a[href="x\"": `},
 	} {
 		out, err := Fetch(context.Background(), srv.URL+"/p", tc.opts)
 		if err != nil {
 			t.Fatalf("%+v: invalid selector must not error: %v", tc.opts, err)
 		}
-		if want := "Contents of " + srv.URL + "/p:\n" + tc.want; out != want {
-			t.Fatalf("%+v: want %q, got:\n%s", tc.opts, want, out)
+		// The reason is the CSS parser's wording, not pinned here.
+		if want := "Contents of " + srv.URL + "/p:\n" + tc.want; !strings.HasPrefix(out, want) || !strings.HasSuffix(out, ".</error>") || strings.Count(out, "\n") != 1 {
+			t.Fatalf("%+v: want %q…, got:\n%s", tc.opts, want, out)
 		}
 	}
 }
