@@ -795,6 +795,27 @@ func TestFetch_ExcludeSelectorsWithReadabilityBase(t *testing.T) {
 	}
 }
 
+func TestExtract_ExcludeSelectorsNormalized(t *testing.T) {
+	// The Readability path NFC-normalizes the page and strips soft hyphens, so
+	// selectors are normalized too: NFD / soft-hyphen text in them still
+	// matches.
+	page := `<!doctype html><html><body><article><h1>T</h1>
+		<p title="cafe` + "\u0301" + `">DROPNFD enough words here that readability keeps this paragraph around by default.</p>
+		<p class="x">DROPSHY Co` + "\u00ad" + `op enough words here that readability keeps this paragraph around too.</p>
+		<p>KEEPMARKER the primary body text, long enough to be considered the main content of the page. Caf` + "e\u0301" + ` Co` + "\u00ad" + `op.</p>
+		</article></body></html>`
+	out := extractContentFromHTML(page, nil, Options{ExcludeSelectors: []string{
+		`p[title="cafe` + "\u0301" + `"]`,
+		`p:contains("Co` + "\u00ad" + `op enough")`,
+	}})
+	if strings.Contains(out, "DROPNFD") || strings.Contains(out, "DROPSHY") || !strings.Contains(out, "KEEPMARKER") {
+		t.Fatalf("unexpected pruning result:\n%s", out)
+	}
+	if !strings.Contains(out, "Caf\u00e9 Coop.") {
+		t.Fatalf("expected NFC text without soft hyphens, got:\n%q", out)
+	}
+}
+
 func TestSliceRunes_MatchesRuneSlicing(t *testing.T) {
 	inputs := []string{"", "abc", "héllo wörld ✓✓✓", "日本語のテキスト", "a"}
 	for _, s := range inputs {

@@ -38,6 +38,13 @@ func TestExtractParity(t *testing.T) {
 			if got := extractContentFromHTML(body, base, Options{IncludeMetadata: true}); got != string(want) {
 				t.Errorf("output differs from golden\n--- got ---\n%s\n--- want ---\n%s", got, want)
 			}
+			// ExcludeSelectors builds the tree itself before Readability; with
+			// nothing to exclude it must match the default path (NFC, soft
+			// hyphens stripped).
+			excl := Options{IncludeMetadata: true, ExcludeSelectors: []string{"#webfetch-no-such-element"}}
+			if got := extractContentFromHTML(body, base, excl); got != string(want) {
+				t.Errorf("ExcludeSelectors output differs from golden\n--- got ---\n%s\n--- want ---\n%s", got, want)
+			}
 		})
 	}
 }

@@ -394,16 +394,29 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 	// none are set this block is skipped entirely and the output is byte-identical
 	// to upstream.
 	if len(opts.ExcludeSelectors) > 0 || opts.Selector != "" || opts.FullPage {
-		doc, perr := goquery.NewDocumentFromReader(strings.NewReader(page))
+		viaReadability := opts.Selector == "" && !opts.FullPage
+		var src io.Reader = strings.NewReader(page)
+		if viaReadability {
+			// Readability's Parse normalizes the text (NFC, soft hyphens
+			// removed) before parsing; do the same so this path agrees with
+			// the default one.
+			src = readability.NormalizeText(src)
+		}
+		doc, perr := goquery.NewDocumentFromReader(src)
 		if perr != nil {
 			return errSimplify
 		}
 		for _, sel := range opts.ExcludeSelectors {
 			if sel = strings.TrimSpace(sel); sel != "" {
+				if viaReadability {
+					// Normalize the selector like the tree, or NFD / soft-hyphen
+					// text in it would no longer match.
+					sel = normalizeSelector(sel)
+				}
 				doc.Find(sel).Remove()
 			}
 		}
-		if opts.Selector != "" || opts.FullPage {
+		if !viaReadability {
 			// Readability absolutizes links and drops javascript: links
 			// itself; do the same here so both paths agree (the latter in
 			// selectorMarkdown, after matching).
@@ -434,6 +447,15 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 		}
 	}
 	return markdown
+}
+
+// normalizeSelector applies readability.NormalizeText to a selector string.
+func normalizeSelector(sel string) string {
+	b, err := io.ReadAll(readability.NormalizeText(strings.NewReader(sel)))
+	if err != nil {
+		return sel
+	}
+	return string(b)
 }
 
 // selectorMarkdown converts a subtree (Selector) or the whole body (FullPage) of
