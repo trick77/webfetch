@@ -46,6 +46,7 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"github.com/trick77/webfetch/internal/readability"
 	"golang.org/x/net/html/charset"
+	"golang.org/x/text/unicode/norm"
 )
 
 // DefaultUserAgentAutonomous is the User-Agent sent for autonomous (tool-driven)
@@ -126,20 +127,29 @@ type Options struct {
 	// FullPage converts the entire page to Markdown, skipping the Readability
 	// main-content extraction. Use it when Readability over-strips (docs pages,
 	// tables, sidebars you actually want). Ignored when Selector is set, and when
-	// Raw is set. IncludeMetadata is not applied on this path. Default false.
+	// Raw is set. IncludeMetadata is not applied on this path. The text is
+	// normalized as on the Readability path (NFC, soft hyphens removed), and
+	// Selector / ExcludeSelectors are normalized to match it; text the page
+	// writes as a reference (&shy;, &#x301;) stays as written, so a selector
+	// with NFD / soft-hyphen text does not match it. Default false.
 	FullPage bool
 	// Selector, when set, converts only the element(s) matching this CSS selector
 	// to Markdown, skipping Readability (an escape hatch for targeting a specific
 	// region). Takes precedence over FullPage. Ignored when Raw is set.
-	// IncludeMetadata is not applied on this path. If nothing matches, the content
-	// is the "<error>No content matched the selector.</error>" sentinel (with a
-	// nil error). Default "".
+	// IncludeMetadata is not applied on this path; text is normalized as with
+	// FullPage. If nothing matches, the content is the
+	// "<error>No content matched the selector.</error>" sentinel (with a nil
+	// error). Default "".
 	Selector string
 	// ExcludeSelectors removes element(s) matching these CSS selectors before
 	// conversion. Unlike FullPage/Selector it composes with every non-raw mode,
 	// including the default Readability path (e.g. strip a cookie banner, then
 	// simplify). Empty (the default) leaves the input untouched, so output stays
-	// byte-identical to upstream. Ignored when Raw is set.
+	// byte-identical to upstream. Ignored when Raw is set. The selectors are
+	// normalized (NFC, soft hyphens removed) on every mode, the Readability path
+	// included. A backslash-escaped soft hyphen is not normalized like a literal
+	// one: \AD matches only text the page writes as &shy;, and \ before a
+	// literal one escapes the next character instead.
 	ExcludeSelectors []string
 }
 
@@ -394,12 +404,12 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 	// none are set this block is skipped entirely and the output is byte-identical
 	// to upstream.
 	if len(opts.ExcludeSelectors) > 0 || opts.Selector != "" || opts.FullPage {
-		viaReadability := opts.Selector == "" && !opts.FullPage
+		skipReadability := opts.Selector != "" || opts.FullPage
+		// Readability's Parse normalizes the text (NFC, soft hyphens removed)
+		// before parsing; every opt-in mode does the same, so a page reads the
+		// same whichever mode extracts it.
 		var src io.Reader = strings.NewReader(page)
-		if viaReadability {
-			// Readability's Parse normalizes the text (NFC, soft hyphens
-			// removed) before parsing; do the same so this path agrees with
-			// the default one.
+		if !isNormalText(page) {
 			src = readability.NormalizeText(src)
 		}
 		doc, perr := goquery.NewDocumentFromReader(src)
@@ -408,15 +418,10 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 		}
 		for _, sel := range opts.ExcludeSelectors {
 			if sel = strings.TrimSpace(sel); sel != "" {
-				if viaReadability {
-					// Normalize the selector like the tree, or NFD / soft-hyphen
-					// text in it would no longer match.
-					sel = normalizeSelector(sel)
-				}
-				doc.Find(sel).Remove()
+				doc.Find(normalizeText(sel)).Remove()
 			}
 		}
-		if !viaReadability {
+		if skipReadability {
 			// Readability absolutizes links and drops javascript: links
 			// itself; do the same here so both paths agree (the latter in
 			// selectorMarkdown, after matching).
@@ -449,25 +454,37 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 	return markdown
 }
 
-// normalizeSelector applies readability.NormalizeText to a selector string.
-func normalizeSelector(sel string) string {
-	b, err := io.ReadAll(readability.NormalizeText(strings.NewReader(sel)))
+// isNormalText reports whether readability.NormalizeText would leave s as
+// is: it is valid UTF-8 (the transform turns invalid bytes into U+FFFD), NFC and
+// has no soft hyphen (almost every page).
+func isNormalText(s string) bool {
+	return utf8.ValidString(s) && norm.NFC.IsNormalString(s) && !strings.ContainsRune(s, 0xAD)
+}
+
+// normalizeText applies readability.NormalizeText to s, without the copy when
+// isNormalText.
+func normalizeText(s string) string {
+	if isNormalText(s) {
+		return s
+	}
+	b, err := io.ReadAll(readability.NormalizeText(strings.NewReader(s)))
 	if err != nil {
-		return sel
+		return s
 	}
 	return string(b)
 }
 
 // selectorMarkdown converts a subtree (Selector) or the whole body (FullPage) of
-// an already-pruned, link-absolutized document to Markdown, skipping
-// Readability.
+// an already-normalized, pruned, link-absolutized document to Markdown,
+// skipping Readability.
 func selectorMarkdown(doc *goquery.Document, opts Options) string {
 	var fragment string
 	if opts.Selector != "" {
-		sel := doc.Find(opts.Selector)
+		q := normalizeText(opts.Selector)
+		sel := doc.Find(q)
 		// A match nested inside another match is already part of the outer
 		// one's HTML; keep only the outermost so nothing is emitted twice.
-		sel = sel.NotSelection(sel.Find(opts.Selector))
+		sel = sel.NotSelection(sel.Find(q))
 		if sel.Length() == 0 {
 			return errNoSelector
 		}

@@ -135,8 +135,10 @@ three opt-in `Options` let you bypass or steer it:
 `Raw` still takes precedence over all three, and `IncludeMetadata` is not applied
 on the `FullPage` / `Selector` paths. Relative links are resolved against the
 final URL (after redirects), keeping the page's scheme and directory, as on the
-Readability path. With all of them unset (the default), output is byte-identical
-to upstream.
+Readability path. Text is normalized as on the Readability path (NFC, soft
+hyphens removed) and selectors with it; text the page writes as a reference
+(`&shy;`, `&#x301;`) stays as written. With all of them unset (the default),
+output is byte-identical to upstream.
 
 ### Body cap: `MaxBodyBytes` (10 MiB by default)
 

@@ -13,7 +13,7 @@
 //   - Parse no longer guesses the charset (gogs/chardet): its input must be
 //     UTF-8, which webfetch's decodeBody guarantees. The NFC normalization
 //     and soft-hyphen removal upstream applied while parsing are kept, and
-//     exported as NormalizeText for callers of ParseAndMutate.
+//     exported as NormalizeText for callers that build the tree themselves.
 //   - PublishedTime parses with a fixed set of time layouts instead of
 //     itlightning/dateparse; see parseTime.
 //   - The go-shiori/dom helpers live in ./dom.
@@ -38,8 +38,8 @@ func FromReader(input io.Reader, pageURL *nurl.URL) (Article, error) {
 }
 
 // NormalizeText applies the text normalization Parse runs before parsing
-// (NFC, soft hyphens removed), for callers that build the tree themselves
-// and hand it to ParseAndMutate.
+// (NFC, soft hyphens removed), for callers that build the tree themselves,
+// e.g. to hand it to ParseAndMutate.
 func NormalizeText(r io.Reader) io.Reader {
 	return normalizeTextEncoding(r)
 }

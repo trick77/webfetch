@@ -11,12 +11,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/trick77/webfetch/internal/readability"
+	"golang.org/x/text/unicode/norm"
 )
 
 // allowLoopback relaxes the SSRF guard so tests can reach the loopback
@@ -813,6 +816,101 @@ func TestExtract_ExcludeSelectorsNormalized(t *testing.T) {
 	}
 	if !strings.Contains(out, "Caf\u00e9 Coop.") {
 		t.Fatalf("expected NFC text without soft hyphens, got:\n%q", out)
+	}
+}
+
+func TestExtract_SelectorFullPageNormalized(t *testing.T) {
+	// Selector and FullPage normalize like the Readability path: NFC, soft
+	// hyphens removed. The fixture carries literal NFD accents and U+00AD.
+	raw, err := os.ReadFile("testdata/readability/literal-shy-nfd.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(raw)
+	if !strings.Contains(page, "\u00ad") || norm.NFC.IsNormalString(page) {
+		t.Fatal("fixture lost its soft hyphens / NFD text")
+	}
+	for _, opts := range []Options{{Selector: "article"}, {FullPage: true}} {
+		out := extractContentFromHTML(page, nil, opts)
+		if strings.Contains(out, "\u00ad") || !norm.NFC.IsNormalString(out) {
+			t.Errorf("%+v: expected NFC text without soft hyphens, got:\n%q", opts, out)
+		}
+		if !strings.Contains(out, "R\u00e9publique") || !strings.Contains(out, "travaux") || !strings.Contains(out, "commer\u00e7ants") {
+			t.Errorf("%+v: normalized words missing:\n%q", opts, out)
+		}
+	}
+}
+
+func TestExtract_SelectorNormalized(t *testing.T) {
+	// The tree is normalized, so the selector is too: NFD / soft-hyphen text
+	// in it still matches the page's literal (now normalized) characters.
+	page := `<!doctype html><html><body>
+		<p title="cafe` + "\u0301" + `">NFDMATCH</p>
+		<p>SHYMATCH Co` + "\u00ad" + `op</p>
+		<p>OTHER</p>
+		</body></html>`
+	for sel, want := range map[string]string{
+		`p[title="cafe` + "\u0301" + `"]`:    "NFDMATCH",
+		`p:contains("Co` + "\u00ad" + `op")`: "SHYMATCH",
+	} {
+		out := extractContentFromHTML(page, nil, Options{Selector: sel})
+		if !strings.Contains(out, want) || strings.Contains(out, "OTHER") {
+			t.Errorf("Selector %q: unexpected result:\n%s", sel, out)
+		}
+		out = extractContentFromHTML(page, nil, Options{FullPage: true, ExcludeSelectors: []string{sel}})
+		if strings.Contains(out, want) || !strings.Contains(out, "OTHER") {
+			t.Errorf("ExcludeSelectors %q: unexpected result:\n%s", sel, out)
+		}
+	}
+}
+
+func TestExtract_SelectorNormalizedOneForm(t *testing.T) {
+	// Only the normalized selector is matched: text written as a reference
+	// stays unnormalized in the tree and is not matched.
+	page := `<!doctype html><html><body>
+		<p title="cafe` + "\u0301" + `">LIT1</p>
+		<p title="cafe&#x301;">REF2</p>
+		<p title="cafe` + "\u0301" + `">LIT3</p>
+		</body></html>`
+	sel := `p[title="cafe` + "\u0301" + `"]`
+	if out := extractContentFromHTML(page, nil, Options{Selector: sel}); out != "LIT1\n\nLIT3" {
+		t.Errorf("Selector: want LIT1, LIT3, got:\n%q", out)
+	}
+	if out := extractContentFromHTML(page, nil, Options{ExcludeSelectors: []string{sel}}); !strings.Contains(out, "REF2") || strings.Contains(out, "LIT1") || strings.Contains(out, "LIT3") {
+		t.Errorf("ExcludeSelectors: want only REF2, got:\n%q", out)
+	}
+	// Matching the original form too would invert a negation: "Coop" passes
+	// :not(:contains("Co\u00adop")).
+	page = `<!doctype html><html><body><article>
+		<p>KEEP Co` + "\u00ad" + `op</p>
+		<p title="cafe` + "\u0301" + `">KEEP2</p>
+		<p>OTHER</p>
+		</article></body></html>`
+	sel = `p:not(:contains("Co` + "\u00ad" + `op"))`
+	if out := extractContentFromHTML(page, nil, Options{Selector: sel}); out != "KEEP2\n\nOTHER" {
+		t.Errorf("negated Selector: want KEEP2, OTHER, got:\n%q", out)
+	}
+	if out := extractContentFromHTML(page, nil, Options{ExcludeSelectors: []string{sel}}); !strings.Contains(out, "KEEP Coop") || strings.Contains(out, "OTHER") {
+		t.Errorf("negated ExcludeSelectors: want only KEEP Coop, got:\n%q", out)
+	}
+}
+
+func TestNormalizeText(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                      "",
+		"plain caf\u00e9":       "plain caf\u00e9",
+		"cafe\u0301 co\u00adop": "caf\u00e9 coop",
+		"\u00ad":                "",
+		"\u00e9\u0301 co\u00ad": "\u00e9\u0301 co",
+		"a\xffb":                "a\ufffdb",
+		"a\xff\u00adb":          "a\ufffdb",
+	} {
+		if got := normalizeText(in); got != want {
+			t.Errorf("normalizeText(%q) = %q, want %q", in, got, want)
+		}
+		if got, err := io.ReadAll(readability.NormalizeText(strings.NewReader(in))); err != nil || string(got) != want {
+			t.Errorf("NormalizeText(%q) = %q, %v; normalizeText disagrees", in, got, err)
+		}
 	}
 }
 
