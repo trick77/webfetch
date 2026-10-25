@@ -942,18 +942,31 @@ func TestExtract_SelectorWhitespace(t *testing.T) {
 }
 
 func TestCleanSelector(t *testing.T) {
-	shy := string(rune(0xAD))
+	// Soft hyphen, no-break space, ideographic space.
+	shy, nbsp, ideo := string(rune(0xAD)), string(rune(0xA0)), string(rune(0x3000))
 	for in, want := range map[string]string{
 		"":                "",
-		" \t\n\r\f":       "",
+		" \t\n\r\f\v":     "",
+		nbsp + ideo:       "",
 		" " + shy + " ":   "",
 		" #a ":            " #a ",
 		"#a\\ ":           "#a\\ ",
+		"#a" + nbsp:       "#a" + nbsp,
 		"Co" + shy + "op": "Coop",
 	} {
 		if got := cleanSelector(in); got != want {
 			t.Errorf("cleanSelector(%q) = %q, want %q", in, got, want)
 		}
+	}
+	// A blank-only list becomes nil, so the default path runs, not the
+	// ExcludeSelectors one.
+	o := Options{Selector: nbsp, ExcludeSelectors: []string{" ", shy}}.cleanSelectors()
+	if o.Selector != "" || o.ExcludeSelectors != nil {
+		t.Errorf("cleanSelectors: want blanks unset, got %+v", o)
+	}
+	o = Options{ExcludeSelectors: []string{" ", ".ad", "\n"}}.cleanSelectors()
+	if len(o.ExcludeSelectors) != 1 || o.ExcludeSelectors[0] != ".ad" {
+		t.Errorf("cleanSelectors: want only .ad, got %q", o.ExcludeSelectors)
 	}
 }
 

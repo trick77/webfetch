@@ -139,8 +139,8 @@ type Options struct {
 	// IncludeMetadata is not applied on this path; text is normalized as with
 	// FullPage. If nothing matches, the content is the
 	// "<error>No content matched the selector.</error>" sentinel (with a nil
-	// error). A blank Selector (CSS whitespace only) counts as unset; others go
-	// to the CSS parser as given. Default "".
+	// error). A blank Selector (whitespace only once normalized) counts as
+	// unset; others go to the CSS parser as given. Default "".
 	Selector string
 	// ExcludeSelectors removes element(s) matching these CSS selectors before
 	// conversion. Unlike FullPage/Selector it composes with every non-raw mode,
@@ -401,16 +401,8 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 		article readability.Article
 		err     error
 	)
-	// A blank Selector is unset and blank ExcludeSelectors are dropped, so
-	// neither leaves the default path.
-	opts.Selector = cleanSelector(opts.Selector)
-	var excl []string
-	for _, sel := range opts.ExcludeSelectors {
-		if sel = cleanSelector(sel); sel != "" {
-			excl = append(excl, sel)
-		}
-	}
-	opts.ExcludeSelectors = excl
+	// Blank selectors must not leave the default path.
+	opts = opts.cleanSelectors()
 	// Escape-hatch pre-pass. ExcludeSelectors composes with every mode (including
 	// the default Readability path); Selector / FullPage skip Readability. When
 	// none are set this block is skipped entirely and the output is byte-identical
@@ -464,13 +456,26 @@ func extractContentFromHTML(page string, base *url.URL, opts Options) string {
 	return markdown
 }
 
-// cleanSelector normalizes sel like the tree (normalizeText). A blank result,
-// empty or CSS whitespace only (what cascadia rejects), becomes ""; anything
-// else is kept as is, since cascadia skips the padding itself and trimming
-// would break an escaped trailing space ("#a\ ").
+// cleanSelectors normalizes Selector and ExcludeSelectors like the tree
+// (normalizeText), unsets a blank Selector and drops blank ExcludeSelectors.
+// Blank is empty or whitespace only (unicode.IsSpace) after normalizing: no
+// such selector can match. Others are kept as is: cascadia skips CSS
+// whitespace padding itself, and trimming would break an escaped trailing
+// space ("#a\ ") or a no-break space, which is part of a CSS name.
+func (o Options) cleanSelectors() Options {
+	o.Selector = cleanSelector(o.Selector)
+	var excl []string
+	for _, sel := range o.ExcludeSelectors {
+		if sel = cleanSelector(sel); sel != "" {
+			excl = append(excl, sel)
+		}
+	}
+	o.ExcludeSelectors = excl
+	return o
+}
+
 func cleanSelector(sel string) string {
-	sel = normalizeText(sel)
-	if strings.Trim(sel, " \t\n\r\f") == "" {
+	if sel = normalizeText(sel); strings.TrimSpace(sel) == "" {
 		return ""
 	}
 	return sel
