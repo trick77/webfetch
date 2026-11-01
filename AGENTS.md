@@ -75,6 +75,7 @@ repurpose or export it.
 - Default branch is `master`. Never push to `master` — always branch + PR.
 - Commit subjects + PR titles: Go style `area: what` (`ssrf: …`, `markdown: …`), gated by ship; release
   notes list them by area.
+- Fresh clone: `ship hooks` before the first push (check, conform and init install it too); without the pre-push hook a push skips the gate.
 - A merge ships nothing: release by hand only (see Commands).
 - Dependabot opens grouped dependency PRs weekly (non-major, major apart): CI gates them, then merge.
 - All workflow and config files use the `.yaml` extension (never `.yml`).
