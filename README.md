@@ -1,5 +1,9 @@
 # webfetch
 
+> **Moved.** webfetch now lives in [github.com/trick77/toolkit/webfetch](https://github.com/trick77/toolkit/tree/master/webfetch)
+> (`go get github.com/trick77/toolkit@latest`, import `github.com/trick77/toolkit/webfetch`). This repository is
+> archived; v0.4.11 is its last release.
+
 A dependency-light Go port of the reference Python
 [`mcp-server-fetch`](https://github.com/modelcontextprotocol/servers/tree/main/src/fetch)
 tool.
